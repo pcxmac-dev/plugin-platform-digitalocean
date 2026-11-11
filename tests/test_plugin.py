@@ -369,3 +369,15 @@ def test_the_command_line(made, env):
     assert run("servers") == 1 and errors[0].startswith("digitalocean: GET /v2/droplets: HTTP 500: Server Error")
     with pytest.raises(SystemExit):
         run("nonsense")
+
+
+def test_the_platforms_one_shot_command_starts_nothing(made):
+    """The platform's status and machine commands attach it to answer and end (PlatformApp.once, liminal-platform
+    0.20.1): nothing of it runs on its own then."""
+    p, fake = made()
+    p.attach(type("Once", (), {"NAME": "platform", "once": True})(), Pairs(settings_of(ddns=True)))
+    try:
+        time.sleep(0.1)
+        assert not p.working and fake.requests == []
+    finally:
+        p.detach()

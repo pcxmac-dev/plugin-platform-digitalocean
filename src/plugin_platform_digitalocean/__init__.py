@@ -690,7 +690,7 @@ class DigitalOceanPlugin(MachinePlugin):
         interface = super().attach(app, login)
         with self._rt.lock:
             self._rt.config = None
-        if getattr(app, "NAME", "") == PLATFORM:
+        if getattr(app, "NAME", "") == PLATFORM and not getattr(app, "once", False):  # never a one-shot command's
             self._start()
         return interface
 
@@ -804,7 +804,7 @@ class DigitalOceanPlugin(MachinePlugin):
             return {"present": False, "valid": False, "why": NOT_SET, "summary": "not set up",
                     "settingsNotSet": ", ".join(NAMES), "tables": [], "actions": [], "forms": []}
         rt, now = self._rt, self._clock()
-        attached = self.app is not None and getattr(self.app, "NAME", "") == PLATFORM  # only the platform's attach reads
+        attached = self.app is not None and getattr(self.app, "NAME", "") == PLATFORM and not getattr(self.app, "once", False)  # only the platform's attach reads
         with rt.lock:
             account, balance, droplets, domains = rt.account, rt.balance, rt.droplets, rt.domains
             records, firewalls, volumes, keys, reserved = dict(rt.records), rt.firewalls, rt.volumes, rt.keys, rt.reserved

@@ -36,6 +36,8 @@ finding; its DigitalOcean section: 2 blockers, 6 should-fix, 4 minor). Needs lim
 Left as they are, as the user's calls: the account read every quarter of an hour while the platform has it attached,
 and the variable DIGITALOCEAN_TOKEN, which Terraform and PyDo read too.
 
+The platform's one-shot commands (status, machine: `PlatformApp.once`, liminal-platform 0.20.1) start none of its background work.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "ALSO i would like to add two new plugins, Digital Ocean and LINODE"; for the cloud plugins
