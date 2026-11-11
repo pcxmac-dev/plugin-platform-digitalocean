@@ -5,10 +5,15 @@ rules' own calls (POST and DELETE /v2/firewalls/{id}/rules: the firewall's other
 so they are kept). A cloud firewall blocks all traffic no rule allows, and a deny rule takes precedence over the allow
 rules matching the same traffic (DigitalOcean's Cloud Firewalls page).
 
+A rule's `action` is DigitalOcean's own (its reference's rule object: "This may be one of `allow` or `deny`", allow
+unless set; its release note of August 2026: "Cloud firewall rules now support an action of allow or deny"). A deny rule
+added is read back, and one DigitalOcean took as an allow is removed again at once (the plugin's add_firewall_rule).
+
 A rule is named on the page by its key (`key_of`: its direction, action, protocol, ports and every target, sorted): the
 rule removed is the one read fresh with that key, sent back as it was read. Risky changes (`risk_of_add`,
-`risk_of_remove`) are asked a second time: a rule opening SSH or every port to the whole internet, a deny rule shutting SSH
-out of the firewall's Droplets, and removing a rule that lets SSH in to them."""
+`risk_of_remove`) are asked a second time: an allow opening SSH, another way in (EXPOSED: Remote Desktop, Docker's API, a
+database ...) or every port (a range of WIDE_PORTS or more) to the whole internet or a wide part of it; any deny over SSH
+or every port, added or removed; and removing the rule that lets SSH in to the firewall's Droplets."""
 from __future__ import annotations
 
 import ipaddress
@@ -24,6 +29,12 @@ TARGETS = (("addresses", "addresses"), ("droplet_ids", "Droplets"), ("load_balan
            ("kubernetes_ids", "Kubernetes clusters"), ("tags", "tags"))
 EVERYWHERE = ("0.0.0.0/0", "::/0")
 SSH = 22
+WIDE_PORTS = 1000  # a range of this many ports or more is taken as every port (23-65535: every port but SSH)
+WIDE_V4, WIDE_V6 = 2 ** 24, 32  # sources this wide are taken as the whole internet: a /8 of IPv4 in all, an IPv6 /32
+EXPOSED = {  # what an allow from the whole internet is asked twice for, beside SSH and every port
+    22: "SSH", 23: "Telnet", 2375: "Docker's API", 2376: "Docker's API over TLS", 3389: "Remote Desktop", 5900: "VNC",
+    5985: "WinRM", 5986: "WinRM over HTTPS", 3306: "MySQL", 5432: "PostgreSQL", 6379: "Redis", 27017: "MongoDB",
+    9200: "Elasticsearch", 11211: "memcached"}
 TAG = re.compile(r"^[A-Za-z0-9:_.\-]{1,255}$")
 
 
@@ -102,24 +113,70 @@ def covers(ports, port: int) -> bool:
         return False
 
 
-def every_port(ports) -> bool:
+def span(ports) -> tuple[int, int] | None:
+    """The ports a rule takes, (first, last): every port for "0"; None when they cannot be read."""
     p = str(ports if ports is not None else "0").strip().lower()
-    return p in ("0", "all", "", "1-65535")
+    if p in ("0", "all", ""):
+        return 1, 65535
+    low, _, high = p.partition("-")
+    try:
+        return int(low), int(high or low)
+    except ValueError:
+        return None
+
+
+def wide_ports(ports) -> bool:
+    """Whether a rule takes every port, or a range of WIDE_PORTS or more (23-65535 is every port but SSH)."""
+    s = span(ports)
+    return s is not None and s[1] - s[0] + 1 >= WIDE_PORTS
+
+
+def ports_said(protocol: str, ports) -> str:
+    s = span(ports)
+    if s == (1, 65535):
+        return f"every {protocol} port"
+    return f"{protocol} ports {s[0]}-{s[1]}" if s else f"{protocol} ports {ports}"
 
 
 def to_everyone(addresses: Iterable[str]) -> bool:
-    """Whether the addresses take in the whole internet (0.0.0.0/0, ::/0)."""
+    """Whether the addresses take in the whole internet (0.0.0.0/0, ::/0) or a wide part of it: public IPv4 ranges of a
+    /8 or more in all (0.0.0.0/1 and 128.0.0.0/1 together are all of it), a public IPv6 range of a /32 or wider. A
+    private range (a VPC's 10.0.0.0/8) is not the internet."""
+    v4 = 0
     for a in addresses:
         try:
-            if ipaddress.ip_network(str(a), strict=False).prefixlen == 0:
-                return True
+            n = ipaddress.ip_network(str(a), strict=False)
         except ValueError:
             continue
-    return False
+        if n.is_private:
+            continue
+        if n.version == 4:
+            v4 += n.num_addresses
+        elif n.prefixlen <= WIDE_V6:
+            return True
+    return v4 >= WIDE_V4
+
+
+def everyone_said(addresses: Iterable[str]) -> str:
+    whole = any(str(a) in EVERYWHERE for a in addresses)
+    return "the whole internet" if whole else f"a wide part of the internet ({', '.join(str(a) for a in addresses)})"
 
 
 def lets_ssh_in(rule: Mapping) -> bool:
     return action_of(rule) == "allow" and str(rule.get("protocol") or "").lower() == "tcp" and covers(rule.get("ports"), SSH)
+
+
+def denied(rule: Mapping) -> str | None:
+    """What a deny rule shuts that is asked twice, in words: every port (or a wide range of them) of its protocol, or
+    SSH; None for any other rule."""
+    if action_of(rule) != "deny":
+        return None
+    protocol = str(rule.get("protocol") or "").lower()
+    if protocol in ("tcp", "udp") and wide_ports(rule.get("ports")):
+        return ports_said(protocol, rule.get("ports"))
+    if protocol == "tcp" and covers(rule.get("ports"), SSH):
+        return "SSH (port 22)"
+    return None
 
 
 def applies_to(fw: Mapping) -> str:
@@ -134,30 +191,42 @@ def applies_to(fw: Mapping) -> str:
 
 
 def risk_of_add(direction: str, rule: Mapping, fw: Mapping) -> str | None:
-    """Why adding `rule` to `fw` is risky (asked a second time), or None."""
-    if direction != "inbound":
-        return None
+    """Why adding `rule` to `fw` is risky (asked a second time), or None: an inbound allow opening SSH, another way in
+    (EXPOSED) or every port (a wide range) to the whole internet or a wide part of it; any deny over SSH or every port,
+    whatever the firewall applies to now (it may be applied to Droplets later)."""
     protocol = str(rule.get("protocol") or "").lower()
+    shut = denied(rule)
+    if shut:
+        whom = applies_to(fw) or "the Droplets it is applied to (none yet)"
+        return (f"a deny rule takes precedence over the allow rules matching the same traffic: it shuts {shut} of "
+                f"{fw.get('name')} ({whom}) {'from' if direction == 'inbound' else 'to'} {targets_words(direction, rule)}")
+    if direction != "inbound" or action_of(rule) != "allow":
+        return None
     addresses = targets_of(direction, rule)["addresses"]
-    if action_of(rule) == "allow" and to_everyone(addresses):
-        if protocol in ("tcp", "udp") and every_port(rule.get("ports")):
-            return f"it opens every {protocol} port of {fw.get('name')}'s Droplets to the whole internet"
-        if protocol == "tcp" and covers(rule.get("ports"), SSH):
-            return f"it opens SSH (port 22) of {fw.get('name')}'s Droplets to the whole internet"
-    if action_of(rule) == "deny" and protocol == "tcp" and covers(rule.get("ports"), SSH) and applies_to(fw):
-        return (f"a deny rule takes precedence over the allow rules: SSH (port 22) would be shut out of "
-                f"{applies_to(fw)} from {targets_words(direction, rule)}")
+    if not to_everyone(addresses):
+        return None
+    if protocol in ("tcp", "udp") and wide_ports(rule.get("ports")):
+        return f"it opens {ports_said(protocol, rule.get('ports'))} of {fw.get('name')}'s Droplets to {everyone_said(addresses)}"
+    if protocol == "tcp":
+        ways = [f"{name} (port {port})" for port, name in EXPOSED.items() if covers(rule.get("ports"), port)]
+        if ways:
+            return f"it opens {', '.join(ways)} of {fw.get('name')}'s Droplets to {everyone_said(addresses)}"
     return None
 
 
 def risk_of_remove(direction: str, rule: Mapping, fw: Mapping) -> str | None:
-    """Why removing `rule` from `fw` is risky (asked a second time), or None: the rule letting SSH in to the Droplets the
-    firewall applies to (a cloud firewall blocks what no rule allows)."""
+    """Why removing `rule` from `fw` is risky (asked a second time), or None: a deny over SSH or every port (what it
+    shut is let through again), and the rule letting SSH in to the Droplets the firewall applies to (a cloud firewall
+    blocks what no rule allows)."""
+    shut = denied(rule)
+    if shut:
+        return (f"it is a deny rule over {shut}: without it, {shut} is let through again "
+                f"{'from' if direction == 'inbound' else 'to'} {targets_words(direction, rule)} wherever an allow rule "
+                "lets it")
     if direction != "inbound" or not lets_ssh_in(rule) or not applies_to(fw):
         return None
     others = [r for r in (fw.get("inbound_rules") or []) if lets_ssh_in(r) and key_of("inbound", r) != key_of("inbound", rule)]
-    still = ("; other rules still let SSH in from " + " | ".join(targets_words("inbound", r) for r in others)) if others \
-        else "; no other rule lets SSH in"
+    still = ("; other rules still let SSH in from " + " | ".join(targets_words("inbound", r) for r in others)) if others         else "; no other rule lets SSH in"
     return (f"it lets SSH (port 22) in to {applies_to(fw)} from {targets_words(direction, rule)}: without it SSH from there "
             f"is blocked (a cloud firewall blocks what no rule allows){still}")
 

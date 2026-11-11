@@ -13,11 +13,14 @@ from .records import CAA_TAGS, TTL_DEFAULT, TTL_MAX, TTL_MIN, TYPES, kept_by_dig
 
 ACCEPT_HARD = "accept_hard"  # power(): a hard power-off (power_off, power_cycle) accepted
 ACCEPT_RISKY = "accept_risky"  # the firewall rules' hooks: a risky rule accepted
+ACCEPT_REPLACE = "accept_replace"  # set_record(): what a record holds replaced, accepted
 BILLING = ("A powered-off Droplet still bills: DigitalOcean bills a Droplet until it is destroyed, powered off or not "
            "(bundled-plan CPU and GPU Droplets alike), and this plugin never destroys one.")
+NO_NEW_CHARGE = ("Powering one on starts no new charge, for the same reason: it was billed while it was off. So it is "
+                 "asked once.")
 STATES = {"active": "on", "off": "off", "new": "being made", "archive": "archived"}
 POWER = {  # a Droplet's actions here: (title, what it does)
-    "power_on": ("Power on", "turns it on"),
+    "power_on": ("Power on", "turns it on; no new charge starts: it was billed while off too"),
     "shutdown": ("Shut down", "asks its system to shut down, as the shutdown command would; DigitalOcean sends it but "
                  "cannot make it succeed. Off, it is still billed"),
     "reboot": ("Reboot", "asks its system to restart, as the reboot command would"),
@@ -197,9 +200,10 @@ def rules_table(fw: Mapping, names: Mapping, writable: bool) -> dict:
             rows.append(row)
     table = {"title": f"{fw.get('name')} rules",
              "note": (f"applies to {fwmod.applies_to(fw) or 'no Droplet'} · " +
-                      ("added and removed here one rule at a time: its other rules, Droplets and tags are kept; a rule "
-                       "opening SSH or every port to the whole internet, and removing the one letting SSH in, are asked "
-                       "twice" if writable else "changed once the token is set")),
+                      ("added and removed here one rule at a time: its other rules, Droplets and tags are kept; asked "
+                       "twice: an allow opening SSH, another way in or every port to the whole internet, any deny over "
+                       "SSH or every port, and removing the rule letting SSH in" if writable else
+                       "changed once the token is set")),
              "columns": [{"title": "Direction"}, {"title": "Action"}, {"title": "Protocol and ports"},
                          {"title": "From / to"}, *([{"title": ""}] if writable else [])],
              "rows": rows, "empty": "No rules: it blocks everything."}
@@ -265,13 +269,14 @@ def power_form(d: Mapping) -> dict | None:
     if not actions or d.get("locked"):
         return None
     name, did = str(d.get("name") or d.get("id")), d.get("id")
+    starts = (" " + NO_NEW_CHARGE) if "power_on" in actions else ""  # a Droplet that is off: its start said asked once
     accept = {"name": ACCEPT_HARD, "type": "accept", "title": "Cut its power?", "yes": "Cut the power",
               "words": ("{action} cuts {name}'s power at once, as pulling its plug would: unsaved data is lost (whatever "
                         "it has not written to disk), and its file systems may need checking when it starts again. "
                         "DigitalOcean's advice: shut it down first, and power it off only when that does not work.")}
     return {"id": f"power:{did}", "hook": "power", "title": f"Power {name}",
             "note": ("A shutdown or a reboot asks its system; a power-off or a power cycle cuts the power (asked twice). "
-                     + BILLING),
+                     + BILLING + starts),
             "fields": [{"name": "droplet_id", "label": "Droplet ID", "type": "fixed", "value": did},
                        {"name": "name", "label": "Droplet", "type": "fixed", "value": name},
                        {"name": "action", "label": "Action", "type": "choice", "value": actions[0],
@@ -279,7 +284,7 @@ def power_form(d: Mapping) -> dict | None:
                        accept],  # asked only for a hard one (HARD): the hook refuses it without
             "submit": "Review",
             "confirm": {"title": "{action}: {name}?",
-                        "words": "{name} (ID {droplet_id}): {action}. " + BILLING,
+                        "words": "{name} (ID {droplet_id}): {action}. " + BILLING + starts,
                         "yes": "Ask DigitalOcean", "danger": True}}
 
 
@@ -291,8 +296,9 @@ def record_forms(domain: str, default_ttl: int | None = None) -> list[dict]:
     ttl = default_ttl or TTL_DEFAULT
     return [
         {"id": f"set:{d}", "hook": "set_record", "title": f"Set a record in {d}",
-         "note": ("An A, AAAA or CNAME changes the host's record of its type in place (made when it has none); a TXT, MX, "
-                  "NS, CAA or SRV record is added beside the others, or changed when one with the same data is there."),
+         "note": ("An A, AAAA or CNAME changes the host's record of its type in place (made when it has none; you are asked "
+                  "again, naming what it holds, before it is replaced); a TXT, MX, NS, CAA or SRV record is added beside "
+                  "the others, or changed when one with the same data is there."),
          "fields": [fixed,
                     {"name": "name", "label": "Name", "type": "text", "required": True, "placeholder": "@, www, home",
                      "note": f"@ is {d} itself; home is home.{d}"},
@@ -311,7 +317,11 @@ def record_forms(domain: str, default_ttl: int | None = None) -> list[dict]:
                     {"name": "flags", "label": "Flags", "type": "number", "min": 0, "max": 255, "placeholder": "0",
                      "when": {"rtype": ["CAA"]}, "empty": "0"},
                     {"name": "tag", "label": "Tag", "type": "choice", "value": "issue", "when": {"rtype": ["CAA"]},
-                     "choices": [{"value": t, "title": t} for t in CAA_TAGS]}],
+                     "choices": [{"value": t, "title": t} for t in CAA_TAGS]},
+                    {"name": ACCEPT_REPLACE, "type": "accept", "title": "Replace what it holds?", "yes": "Replace it",
+                     "words": ("The refusal above names what the record holds now. Set, {name} {rtype} holds {data} "
+                               "instead, in place, and what it held is gone: whatever answered there stops answering "
+                               "at that name.")}],
          "submit": "Review the change",
          "confirm": {"title": f"Set this record in {d}?", "words": "{name} {rtype} {data} is set in {domain}. " + kept,
                      "yes": "Set the record"}},
@@ -332,17 +342,22 @@ def firewall_forms(fw: Mapping) -> list[dict]:
             {"name": "firewall", "label": "Firewall", "type": "fixed", "value": name}]
     add_accept = {"name": ACCEPT_RISKY, "type": "accept", "title": "Add this rule anyway?", "yes": "Add it anyway",
                   "words": ("The refusal above says what this rule does to {firewall}'s Droplets. A rule open to the whole "
-                            "internet lets anyone try to reach them there; a deny rule over SSH can lock you out of them "
-                            "until it is removed (DigitalOcean's web console still reaches them).")}
+                            "internet lets anyone try to reach them there; a deny rule over SSH or every port shuts that "
+                            "traffic out of them from where it names until it is removed, whatever allows it (you may "
+                            "lose your way in, short of DigitalOcean's web console). A deny rule added is read back, "
+                            "and removed again at once if DigitalOcean took it as an allow.")}
     remove_accept = {"name": ACCEPT_RISKY, "type": "accept", "title": "Remove this rule anyway?", "yes": "Remove it anyway",
-                     "words": ("Without it, SSH may no longer reach {firewall}'s Droplets from where this rule let it in "
-                               "(a cloud firewall blocks what no rule allows): you may lose your way in to them, short of "
-                               "DigitalOcean's web console.")}
+                     "words": ("The refusal above says what removing it does. Without a rule letting SSH in, SSH may no "
+                               "longer reach {firewall}'s Droplets from where it let it in (a cloud firewall blocks what no "
+                               "rule allows), and you may lose your way in to them, short of DigitalOcean's web console; "
+                               "without a deny rule, what it shut out is let through again wherever an allow rule lets "
+                               "it.")}
     return [
         {"id": f"fw-add:{fid}", "hook": "add_firewall_rule", "title": f"Add a rule to {name}",
          "note": ("A rule allows (or denies) traffic of a protocol on its ports, from its sources (inbound) or to its "
                   "destinations (outbound): addresses or ranges (0.0.0.0/0 and ::/0 are the whole internet), Droplets by "
-                  "name or ID, tags. One opening SSH or every port to the whole internet is asked twice."),
+                  "name or ID, tags. Asked twice: an allow opening SSH, another way in (Remote Desktop, Docker's API, a "
+                  "database) or every port to the whole internet, and any deny over SSH or every port."),
          "fields": [*head,
                     {"name": "direction", "label": "Direction", "type": "choice", "value": "inbound",
                      "choices": [{"value": "inbound", "title": "inbound", "note": "traffic coming in to the Droplets"},
@@ -375,7 +390,8 @@ def firewall_forms(fw: Mapping) -> list[dict]:
 def key_forms() -> list[dict]:
     return [
         {"id": "key-add", "hook": "add_ssh_key", "title": "Add an SSH key",
-         "note": "A public key (one line: its type, its key, a comment), as ssh-keygen writes it to a .pub file.",
+         "note": ("A public key: the one line of a .pub file (its type, its key, a comment), as ssh-keygen writes it. "
+                  "Never the private key (the file without .pub)."),
          "fields": [{"name": "name", "label": "Name", "type": "text", "required": True, "placeholder": "laptop"},
                     {"name": "public_key", "label": "Public key", "type": "text", "required": True,
                      "placeholder": "ssh-ed25519 AAAAC3Nza… you@host"}],

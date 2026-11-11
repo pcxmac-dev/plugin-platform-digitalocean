@@ -7,11 +7,13 @@
     records DOMAIN                           a domain's records
     firewalls                                the cloud firewalls and their rules
     keys                                     the account's SSH keys
-    ddns [--now]                             a Dynamic DNS pass: a host's record set where it differs (--now: every host)
+    ddns [--now]                             a Dynamic DNS pass: a host of its own set where it differs (--now: every
+                                             host of its own; one holding another address is left as it is)
     power NAME on|off|reboot|hard-off|cycle  a Droplet (by its name or ID) powered on, shut down, rebooted, powered off
                                              hard or power cycled; asks "yes" first, the hard ones twice
     set DOMAIN NAME TYPE DATA [--ttl N] [--priority N] [--port N] [--weight N] [--flags N] [--tag T]
-                                             a record set, every other record kept; asks "yes" first
+                                             a record set, every other record kept; asks "yes" first, and again
+                                             before what a record holds is replaced
     remove DOMAIN NAME TYPE [DATA]           a record removed, the rest kept; asks "yes" first
 
 --json prints the answer as JSON. The cloud firewalls' rules and the SSH keys are changed from the platform's page."""
@@ -27,6 +29,7 @@ from . import MACHINE, page
 from . import firewall as fwmod
 from .api import HARD
 from .errors import Refusal
+from .page import ACCEPT_REPLACE
 from .records import said
 
 POWER_WORDS = {"on": "power_on", "off": "shutdown", "reboot": "reboot", "hard-off": "power_off", "cycle": "power_cycle"}
@@ -144,8 +147,17 @@ def main(argv: list[str] | None = None, plugin=None, out=None, err=None, ask=Non
                              "kept."):
                 tell("not written")
                 return 1
-            answer = p.set_record(args.domain, args.name, args.type, args.data, ttl=args.ttl, priority=args.priority,
-                                  port=args.port, weight=args.weight, flags=args.flags, tag=args.tag)
+            asked = dict(ttl=args.ttl, priority=args.priority, port=args.port, weight=args.weight, flags=args.flags,
+                         tag=args.tag)
+            try:
+                answer = p.set_record(args.domain, args.name, args.type, args.data, **asked)
+            except Refusal as e:
+                if e.accept != ACCEPT_REPLACE:
+                    raise
+                if not confirmed(f"{e} Replace it?"):  # the second yes: what the record holds now is named
+                    tell("not written")
+                    return 1
+                answer = p.set_record(args.domain, args.name, args.type, args.data, **asked, accept_replace=True)
             lines = [f"{answer['domain']}: {answer['said']}", *(f"  {x}" for x in answer["lines"])]
         else:  # remove
             shown = said({"name": args.name, "type": args.type.upper(), "data": args.data or "(its one record)"})

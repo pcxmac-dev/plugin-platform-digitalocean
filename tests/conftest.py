@@ -117,6 +117,7 @@ class FakeDigitalOcean:
         self.fail: dict[tuple[str, str], tuple[int, dict]] = {}  # (method, path) -> (status, body)
         self.down = False  # every request fails to connect
         self.echo_token = False  # a 401's message holds the token (to see it scrubbed)
+        self.drop_action = False  # a rule added loses its action (a deny taken as an allow: to see it undone)
         self.remaining = 5000
         self.next_id = 1000
 
@@ -237,7 +238,8 @@ class FakeDigitalOcean:
             for k in ("inbound_rules", "outbound_rules"):
                 for rule in data.get(k) or []:
                     if method == "POST":
-                        fw[k] = [*(fw.get(k) or []), rule]
+                        kept = {x: y for x, y in rule.items() if x != "action"} if self.drop_action else rule
+                        fw[k] = [*(fw.get(k) or []), kept]
                     elif rule in (fw.get(k) or []):
                         fw[k] = [x for x in fw[k] if x != rule]
                     else:
@@ -276,6 +278,18 @@ class FakeDigitalOcean:
         return self.not_found()
 
 
+class Platform:
+    """The platform app as a plugin sees it attaching it: its NAME (the background starts for it alone)."""
+
+    NAME = "platform"
+
+
+class Charts:
+    """Another app attaching every plugin it finds (the charts app run alone)."""
+
+    NAME = "charts"
+
+
 class Pairs(Login):
     """A login holding pairs by name (the login app's store, as the Login interface asks it)."""
 
@@ -309,15 +323,16 @@ def settings_of(token: bool = True, ddns: bool = False, **more) -> dict[str, str
 
 
 @pytest.fixture(autouse=True)
-def _no_digitalocean_no_network(monkeypatch):
+def _no_digitalocean_no_network(monkeypatch, tmp_path):
     """No test reaches DigitalOcean, a name server or this machine's settings: the library's HTTPS and DNS refused, every
-    DIGITALOCEAN_ variable cleared."""
+    DIGITALOCEAN_ variable cleared, the platform's folder (Dynamic DNS's state) the test's own."""
     def refused(*a, **k):
         raise AssertionError("a test reached for the network")
     monkeypatch.setattr(rest_mod, "_requests_transport", refused)
     monkeypatch.setattr(dns_mod, "query", refused)
     for n in NAMES:
         monkeypatch.delenv(n, raising=False)
+    monkeypatch.setenv("LIMINAL_PLATFORM_DIR", str(tmp_path / "platform"))
 
 
 @pytest.fixture

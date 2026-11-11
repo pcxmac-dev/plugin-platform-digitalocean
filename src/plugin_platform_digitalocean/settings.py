@@ -27,7 +27,8 @@ KEYS = (
                  "of the free changes alone)")),
     KeyVar(DDNS_HOSTS, label="Dynamic DNS hosts", secret=False,
            hint=("optional: hosts kept at this network's public IPv4 address, comma separated, each in one of the account's "
-                 "domains: home.example.com, @.example.com (the domain itself)")),
+                 "domains: home.example.com, @.example.com (the domain itself); a host holding another address is "
+                 "left as it is until you take it over on the platform's page")),
     KeyVar(DDNS_MINUTES, label="Dynamic DNS minutes", secret=False,
            hint="optional: minutes between Dynamic DNS checks, 1 to 1440 (5 unless set)"),
 )
@@ -90,7 +91,10 @@ def parse(values: Mapping[str, str]) -> Config:
     present = frozenset(n for n in NAMES if v[n])
     problems: list[str] = []
     token = v[TOKEN]
-    if token and not TOKEN_FORM.match(token):
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in token):  # a token pasted with a line break: never sent
+        problems.append(f"{TOKEN} holds a space or a line break: enter it again, alone (nothing is sent with it)")
+        token = ""
+    elif token and not TOKEN_FORM.match(token):
         problems.append(f"{TOKEN} does not look like a personal access token (letters, digits, _ and -, dop_v1_…): it is "
                         "sent as it is")
     minutes = minutes_of(v[DDNS_MINUTES])

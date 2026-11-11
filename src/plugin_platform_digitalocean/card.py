@@ -271,6 +271,8 @@ API = Api(
         Link("Reserved IP pricing", RESERVED_IP_PRICING, "pricing"),
         Link("DigitalOcean's status", STATUS, "status"),
         Link("Release notes", "https://docs.digitalocean.com/release-notes/", "changelog"),
+        Link("Cloud firewall deny rules (August 2026)", "https://docs.digitalocean.com/notes/2026/firewalls-deny-rules/",
+             "changelog"),
         Link("OpenAPI specification", "https://github.com/digitalocean/openapi", "spec"),
         Link("Tokens in the control panel", TOKENS, "console"),
         Link("doctl, the command line", "https://docs.digitalocean.com/reference/doctl/", "tool"),

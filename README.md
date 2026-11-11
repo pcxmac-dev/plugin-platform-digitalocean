@@ -32,39 +32,61 @@ A machine plugin of the platform (`liminal_libs.machines.MachinePlugin`, plugin 
 
 ## What it changes, each confirmed (all free)
 
-- **Power…** on each Droplet: **power on** (when it is off); **shut down** and **reboot** (graceful: its system is
-  asked); **power off** and **power cycle** (hard: the power is cut at once and unsaved data is lost, so they are asked
-  twice; DigitalOcean advises a shutdown first, and a power-off only when that does not work). The Droplet is read
-  again first: its name, its state, not locked by an action under way.
+- **Power…** on each Droplet: **power on** (when it is off; asked once, since it starts no new charge: DigitalOcean
+  billed the Droplet while it was off too, and the dialog says so); **shut down** and **reboot** (graceful: its system
+  is asked); **power off** and **power cycle** (hard: the power is cut at once and unsaved data is lost, so they are
+  asked twice; DigitalOcean advises a shutdown first, and a power-off only when that does not work). The Droplet is
+  read again first: its name, its state, not locked by an action under way.
 - **Set a record…** in each domain: an A, AAAA or CNAME changes the host's record of its type in place (made when it
   has none); a TXT, MX, NS, CAA or SRV record is added beside the others (or changed in place when one with the same
-  data is there: its TTL, its priority). **Remove** on each record. DigitalOcean changes records one at a time, so
-  every other record is kept: none is ever sent. A change is planned on the records at that name read just before it,
-  and refused, with nothing sent, when it could do other than what was confirmed (several A records at the host, a
-  CNAME beside other records, a record changed since it was shown). The SOA record and DigitalOcean's own NS records at
-  the domain itself have no Remove.
+  data is there: its TTL, its priority). **Changing what a record holds is asked twice**: the refusal names what it
+  holds now ("www A 203.0.113.10 is there now"), and the page's second confirmation says it is replaced. **Remove** on
+  each record. DigitalOcean changes records one at a time, so every other record is kept: none is ever sent. A change
+  is planned on the records at that name read just before it, and refused, with nothing sent, when it could do other
+  than what was confirmed (several A records at the host, a CNAME beside other records, a record changed since it was
+  shown). The SOA record and DigitalOcean's own NS records at the domain itself have no Remove.
 - **Add a rule…** to each cloud firewall, and **Remove** on each rule: only the rule is sent (POST or DELETE of the
   firewall's rules), so its other rules, its Droplets and its tags are kept; a rule removed is sent back as it was
-  read. **Risky ones are asked twice**: a rule opening SSH (port 22) or every port to the whole internet (0.0.0.0/0,
-  ::/0), a deny rule over SSH on a firewall that applies to Droplets (a deny takes precedence over the allow rules),
-  and removing the rule letting SSH in to the firewall's Droplets (a cloud firewall blocks what no rule allows).
+  read. A rule allows or denies: DigitalOcean's rules take an action, allow unless set ("This may be one of `allow` or
+  `deny`", its reference's rule object; deny rules came in August 2026), and a deny takes precedence over the allow
+  rules matching the same traffic. A deny rule added is read back, and were DigitalOcean to take it as an allow it is
+  removed again at once and the answer says so. **Asked twice**: an allow opening SSH (port 22), another way in
+  (Telnet, Remote Desktop, VNC, WinRM, Docker's API, MySQL, PostgreSQL, Redis, MongoDB, Elasticsearch, memcached) or
+  every port (a range of 1,000 ports or more) to the whole internet or a wide part of it (public ranges of a /8 or more
+  in all, an IPv6 /32); any deny over SSH or every port, added or removed, whatever the firewall applies to now; and
+  removing the rule letting SSH in to the firewall's Droplets (a cloud firewall blocks what no rule allows).
 - **Add a key…** and **Remove** on each SSH key: new Droplets can be made with a key added; the Droplets made with a
   key removed keep it (DigitalOcean copied it into them when they were made). A private key pasted by mistake is
-refused, and nothing of it is sent.
+  refused: nothing of it is sent to DigitalOcean (and liminal-platform 0.20.1 and later log no form's values).
 
-On the platform's page, each form's confirmation names the exact change; a hard power-off or a risky rule is refused
-first, and the page then asks a second time ("Cut its power?", "Add this rule anyway?"), sending it only on that second
-yes. Its answer says what was done.
+On the platform's page, each form's confirmation names the exact change; a hard power-off, a risky rule or a record's
+value replaced is refused first, and the page then asks a second time ("Cut its power?", "Add this rule anyway?",
+"Replace what it holds?"), sending it only on that second yes. A second confirmation counts only when it is exactly
+true, as the page sends it: a "yes", a "false" or a 1 from another program on this machine is refused like none. Its
+answer says what was done.
 
 ## Dynamic DNS
 
-Each host of `DIGITALOCEAN_DDNS_HOSTS` (in one of the account's domains) is kept at this network's public IPv4 address:
-every few minutes (`DIGITALOCEAN_DDNS_MINUTES`, 5) the address is asked of DNS (`myip.opendns.com` of OpenDNS's
-resolver, else Google's `o-o.myaddr.l.google.com`, each asked by its IPv4 address), and the host's A records of
-DigitalOcean's DNS by their full name. A record that differs is changed in place (its TTL kept); a host without one gets
-one (a TTL of 60 seconds); a host with several A records is left as it is and said so. **Update DNS now** sets every
-host at once. The domain's registrar must name DigitalOcean's name servers (ns1, ns2 and ns3.digitalocean.com) for the
-record to be the one the world sees.
+Each host of `DIGITALOCEAN_DDNS_HOSTS` (in one of the account's domains) is kept at this network's public IPv4 address,
+through the library's keeper (liminal-libs 1.49.2), which changes only what is its own: every few minutes
+(`DIGITALOCEAN_DDNS_MINUTES`, 5) the address is asked of DNS (`myip.opendns.com` of OpenDNS's resolver, else Google's
+`o-o.myaddr.l.google.com`, each asked by its IPv4 address), and the host's A records of DigitalOcean's DNS by their full
+name.
+
+- **Its own**, and kept current: a host with no A record (one is made, a TTL of 60 seconds), one already pointing at
+  this network, one holding the address the keeper set last (after a restart too: what is its own is kept in
+  `digitalocean/ddns.json` under the platform's folder, `LIMINAL_PLATFORM_DIR` or the data folder's `platform/`), and
+  one you took over. A record of its own that differs is changed in place (its TTL kept).
+- **Not its own**, and left as it is: a host holding another address (a live server's, set by hand) or several. Its
+  row says what it holds and offers **Take over…**: confirmed (the dialog names what it holds and that whatever answers
+  there stops answering at that name), the host is pointed at this network on a pass at once, and kept there; a host
+  that held several addresses then keeps one A record. Several addresses are never cut to one unasked.
+- Just before a write the address is asked again: a stale one is never written back. **Update DNS now** is confirmed
+  first, and sets every host of its own (never one that is not). A host taken out of the setting is let go (no longer
+  its own). Once the plugin is detached, a pass under way writes nothing more.
+
+The domain's registrar must name DigitalOcean's name servers (ns1, ns2 and ns3.digitalocean.com) for the record to be
+the one the world sees.
 
 ## Setting it up
 
@@ -140,21 +162,26 @@ never shown, logged or written; every error's words have it taken out. Nothing r
 The plugin is valid while the token is set and the last read worked, or has not been tried yet: the platform disables
 a plugin that is not valid. A part the token cannot read (a scope it lacks) is said beside the rest, not taken for the
 plugin's failure. A read that failed is taken as untried a quarter of an hour later (the platform attaches it again and
-it is tried again), or at once when its settings change. While it is attached, it reads the account every quarter of
-an hour (about 20 to 30 requests; the records of at most 12 domains), the Droplets again half a minute after a power
-action, and the Dynamic DNS hosts every few minutes; detached, nothing of it runs. Its status is what was read last (no
-request is made to answer it).
+it is tried again), or at once when its settings change. A token holding a space or a line break (a wrapped paste set
+outside the page) is never sent: the status asks for it again.
+
+While the platform has it attached, it reads the account every quarter of an hour (about 20 to 30 requests; the records
+of at most 12 domains), the Droplets again half a minute after a power action, and the Dynamic DNS hosts every few
+minutes. Another app attaching it (the charts app run alone attaches every plugin it finds) starts none of it. Detached,
+nothing of it runs: a step under way ends there, asking no login, reading none of the environment and writing nothing.
+Its status is what was read last (no request is made to answer it).
 
 ## Its hooks
 
 `present`, `status` (the summary, the facts, `tables`, `actions`, `forms`), `refresh()`, the reads `droplets()`,
 `domains()`, `records(domain)`, `firewalls()`, `ssh_keys()`, `balance()`, and the changes
 `power(droplet_id, name=None, action="shutdown", accept_hard=False)`,
-`set_record(domain, name, rtype, data, ttl=None, priority=None, port=None, weight=None, flags=None, tag=None)`,
+`set_record(domain, name, rtype, data, ttl=None, priority=None, port=None, weight=None, flags=None, tag=None, accept_replace=False)`,
 `remove_record(domain, name, rtype, data=None, record_id=None)`,
 `add_firewall_rule(firewall_id, firewall=None, direction="inbound", protocol="tcp", ports=None, action="allow", addresses=None, droplets=None, tags=None, accept_risky=False)`,
 `remove_firewall_rule(firewall_id, firewall=None, direction="inbound", rule="", accept_risky=False)`,
-`add_ssh_key(name, public_key)`, `remove_ssh_key(fingerprint, name=None)`, `ddns_update(force=True)`. A refusal is
+`add_ssh_key(name, public_key)`, `remove_ssh_key(fingerprint, name=None)`, `ddns_update(force=True)`,
+`ddns_take_over(host, holds=None)`. A refusal is
 `errors.Refusal` (a ValueError); its `accept` names the argument the page's second confirmation sets. A change's
 answer: `said`, `lines`, `ok`, `changed`.
 
@@ -175,7 +202,8 @@ python -m plugin_platform_digitalocean set example.com home A 203.0.113.7 --ttl 
 python -m plugin_platform_digitalocean remove example.com @ TXT "google-site-verification=..."
 ```
 
-`power`, `set` and `remove` ask "yes" first (`hard-off` and `cycle` twice); `off` is the graceful shutdown. The cloud
+`power`, `set` and `remove` ask "yes" first (`hard-off` and `cycle` twice, `set` again before what a record holds is
+replaced); `off` is the graceful shutdown. The cloud
 firewalls' rules and the SSH keys are changed from the platform's page. `--json` before the command prints the answer
 as JSON.
 

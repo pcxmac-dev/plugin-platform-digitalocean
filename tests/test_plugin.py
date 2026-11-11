@@ -5,12 +5,15 @@ line."""
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
 
+import plugin_platform_digitalocean as module
 import plugin_platform_digitalocean.__main__ as cli
-from conftest import DB, HOME, TOKEN, WEB, FakeDigitalOcean, Pairs, droplet, settings_of
+import plugin_platform_digitalocean.settings as settings_mod
+from conftest import DB, HOME, TOKEN, WEB, Charts, FakeDigitalOcean, Pairs, Platform, droplet, settings_of
 from liminal_libs.machines.rest import RestError
 from plugin_platform_digitalocean import NOT_SET, RETRY_S, SCOPES_WORDS
 from plugin_platform_digitalocean.settings import read
@@ -227,10 +230,10 @@ def test_another_token_makes_a_failed_read_untried_and_forgets_what_the_last_one
     assert "Droplets" not in [t["title"] for t in p.status()["tables"]]  # another token: nothing of the last one shown
 
 
-def test_attached_it_reads_in_the_background_through_the_apps_login_and_detached_nothing_runs(made):
+def test_attached_by_the_platform_it_reads_in_the_background_through_its_login_and_detached_nothing_runs(made):
     p, fake = made()
     login = Pairs(settings_of(ddns=True))
-    p.attach(object(), login)
+    p.attach(Platform(), login)
     try:
         assert p.working
         assert wait_until(lambda: p.status()["summary"] ==
@@ -242,6 +245,61 @@ def test_attached_it_reads_in_the_background_through_the_apps_login_and_detached
     calls = len(fake.requests)
     time.sleep(0.1)
     assert len(fake.requests) == calls
+
+
+def test_another_app_attaching_it_starts_nothing(made):
+    """The charts app run alone attaches every plugin it finds: only the platform's attach starts the reads and Dynamic
+    DNS (App.NAME "platform")."""
+    p, fake = made()
+    login = Pairs(settings_of(ddns=True))
+    for app in (Charts(), object()):
+        p.attach(app, login)
+        try:
+            assert not p.working
+            time.sleep(0.1)
+            assert fake.requests == [] and p.status()["summary"] == "the account is read once attached"
+        finally:
+            p.detach()
+
+
+def test_a_pass_under_way_ends_once_detached_reading_no_settings_and_writing_nothing(made, monkeypatch):
+    """Detached in the middle of a Dynamic DNS pass (its address asked again just before a write, a slow answer): the
+    pass ends there. Nothing is written, no login is asked and none of the environment read after the detach."""
+    monkeypatch.setattr(module, "STOP_WAIT_S", 0.05)
+    hold, held = threading.Event(), threading.Event()
+    asked_address = []
+
+    def public():  # the pass's first ask answers; the ask again before its write hangs until released
+        asked_address.append(1)
+        if len(asked_address) > 1:
+            held.set()
+            hold.wait(5)
+        return HOME, "OpenDNS"
+    p, fake = made(public=public)
+    login = Pairs(settings_of(ddns=True))  # home.example.com has no record: the pass would make one
+    reads = []
+    real = settings_mod.read
+    monkeypatch.setattr(settings_mod, "read", lambda login=None: reads.append(login) or real(login))
+    p.attach(Platform(), login)
+    assert held.wait(5)  # the worker is in its pass, about to write
+    p.detach()  # waits STOP_WAIT_S, then goes: the worker runs on, stopped
+    asked = len(reads)
+    hold.set()
+    assert wait_until(lambda: not any(t.name == "digitalocean" and t.is_alive() for t in threading.enumerate()))
+    assert len(reads) == asked  # no settings asked after the detach (none of the environment read)
+    assert fake.writes() == []  # and no Dynamic DNS write
+    assert p.keeper().state("home.example.com").result == "not updated: the plugin was detached: nothing written"
+
+
+def test_a_token_with_a_line_break_is_never_sent_and_never_shown(made):
+    p, fake = made()
+    p.login = Pairs({"DIGITALOCEAN_TOKEN": TOKEN[:20] + "\r\n" + TOKEN[20:]})  # a wrapped paste, set outside the page
+    st = p.status()
+    assert st["valid"] is False and "holds a space or a line break: enter it again, alone" in st["why"]
+    assert TOKEN[:20] not in json.dumps(st) and TOKEN[20:] not in json.dumps(st) and fake.requests == []
+    with pytest.raises(ValueError, match="not set up"):
+        p.refresh()
+    assert fake.requests == []
 
 
 def test_the_hooks_are_asked_by_name_as_the_platform_asks_them(made, env):
@@ -298,8 +356,11 @@ def test_the_command_line(made, env):
     assert fake.writes()[-1]["json"] == {"type": "reboot"}
     assert run("power", "web-1", "hard-off", say=["yes", "no"]) == 1 and fake.writes()[-1]["json"] == {"type": "reboot"}
     assert run("power", "web-1", "hard-off", say=["yes", "yes"]) == 0 and fake.writes()[-1]["json"] == {"type": "power_off"}
-    assert run("set", "example.com", "home", "A", "203.0.113.99", "--ttl", "300", say=["yes"]) == 0
+    assert run("set", "example.com", "home", "A", "203.0.113.99", "--ttl", "300", say=["yes", "no"]) == 1
+    assert errors == ["not written"] and fake.writes()[-1]["json"] == {"type": "power_off"}  # what it holds is named first
+    assert run("set", "example.com", "home", "A", "203.0.113.99", "--ttl", "300", say=["yes", "yes"]) == 0
     assert lines[0].startswith("example.com: set home A 203.0.113.99")  # ddns made home a moment ago: changed in place
+    assert run("set", "example.com", "home", "A", "203.0.113.99", "--ttl", "600", say=["yes"]) == 0  # its TTL alone: once
     assert run("remove", "example.com", "@", "TXT", say=["yes"]) == 0 and lines[0] == "example.com: removed @ TXT v=spf1 -all"
     assert run("remove", "example.com", "@", "NS", "ns1.digitalocean.com", say=["yes"]) == 1
     assert errors[0].startswith("refused: DigitalOcean keeps its name servers' NS records")

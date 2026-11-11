@@ -3,6 +3,11 @@ Keeper), their A records read and set through the API's domain records (a host's
 records' name= filter takes it; one changed in place by its ID, or made when the host has none). Only for the account's
 domains: DigitalOcean's DNS holds no other.
 
+The Keeper decides what is its own to change (liminal-libs 1.49.2): a host with no A record, one holding the address it
+set last (or this network's already), one the user took over on the page. Any other record is left as it is, so `write`
+is asked only of those. It sets the host's A record to exactly the one address given: a host the user took over while it
+held several addresses keeps one record, changed in place, and loses the others, as its confirmation said.
+
 This network's address is asked of name servers that answer with the asker's own (the library's dns.public_address over
 PUBLIC_IPV4, each server asked by its IPv4 address so the answer is the IPv4 one): OpenDNS's resolver, else Google's."""
 from __future__ import annotations
@@ -28,16 +33,15 @@ def read(api, host: Host) -> list[str]:
 
 
 def write(api, host: Host, ip: str) -> str:
-    """The host's A record set to `ip`: changed in place (its own TTL kept), or made when it has none. A host with several
-    A records is left as it is (which one to change is the user's), and said so."""
+    """The host's A record set to exactly `ip`: its first record changed in place (its own TTL kept) and any other A record
+    of the host deleted (only a host taken over holds several: the keeper leaves any other as it is), or one made."""
     found = a_records(api, host)
-    if len(found) > 1:
-        raise ValueError(f"{host.fqdn} holds {len(found)} A records ({', '.join(str(r.get('data')) for r in found)}): Dynamic "
-                         "DNS keeps a host with one; remove the others first")
-    if found:
-        r = found[0]
-        ttl = max(TTL_MIN, int(r.get("ttl") or TTL))
-        api.update_record(host.zone, r["id"], {"type": "A", "name": host.name, "data": ip, "ttl": ttl})
-        return "set"
-    api.create_record(host.zone, {"type": "A", "name": host.name, "data": ip, "ttl": TTL})
-    return "made"
+    if not found:
+        api.create_record(host.zone, {"type": "A", "name": host.name, "data": ip, "ttl": TTL})
+        return "made"
+    first, rest = found[0], found[1:]
+    ttl = max(TTL_MIN, int(first.get("ttl") or TTL))
+    api.update_record(host.zone, first["id"], {"type": "A", "name": host.name, "data": ip, "ttl": ttl})
+    for r in rest:
+        api.delete_record(host.zone, r["id"])
+    return "set" if not rest else f"set, {len(rest)} other A record{'' if len(rest) == 1 else 's'} removed"

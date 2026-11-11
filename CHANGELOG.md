@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.1 (2026-11-11)
+
+What the audit of the cloud plugins found before any key went in (session 87405e6a: eight reviewers, a skeptic per
+finding; its DigitalOcean section: 2 blockers, 6 should-fix, 4 minor). Needs liminal-libs>=1.49.2.
+
+- **Dynamic DNS changes only what is its own** (liminal-libs 1.49.2's keeper; the audit: a listed host's live record
+  pointed at home within a minute, unasked): a host with no A record, one already pointing here or holding the address
+  it set last (kept in `digitalocean/ddns.json` under the platform's folder, so a restart still knows it), one taken
+  over. Any other record (another address, or several) is left as it is and said so, with **Take over…** on its row
+  (the hook `ddns_take_over(host, holds)`: the record read again and refused if it holds other than the confirmation
+  named, then a pass for it); several addresses are never cut to one unasked; a write sets the host to exactly one
+  address. **Update DNS now** is a confirmed form now, never one click. A host taken out of the setting is let go. The
+  address is asked again just before a write.
+- **The background starts only when the platform attaches the plugin** (App.NAME "platform"): the charts app run
+  alone, which attaches every plugin it finds, starts none of it. Detached, a pass under way ends before its next write,
+  and the thread asks no login and reads none of the environment after the detach (it wrote once more before).
+- **A second confirmation counts only when it is exactly true**, as the page sends it (`accept_hard`, `accept_risky`,
+  `accept_replace`): a "false", a "yes" or a 1 from another program on this machine is refused like none.
+- **Deny rules are kept**: DigitalOcean documents them (its reference's rule object, in Add Rules to a Firewall too:
+  "This may be one of `allow` or `deny`", allow unless set; its release note of August 2026). Every deny over SSH or
+  every port is asked twice now, added or removed, whatever the firewall applies to. A deny added is read back: one
+  DigitalOcean took as an allow is removed again at once, and the answer says so. The API card links that release
+  note (every address on it checked again: all answer).
+- **Wider openings are asked twice**: every port but SSH (a range of 1,000 ports or more), the other ways in (Telnet,
+  Remote Desktop, VNC, WinRM, Docker's API, the databases' ports) and wide sources (public ranges of a /8 or more in
+  all, 0.0.0.0/1 with 128.0.0.0/1, an IPv6 /32), not only SSH or every port from 0.0.0.0/0.
+- **A record's value replaced is asked twice** (`accept_replace`): the refusal names what it holds now; its TTL or
+  priority alone is asked once. The command line's `set` asks a second yes likewise.
+- **A token holding a space or a line break is never sent** (a wrapped paste set outside the page): the status asks for
+  it again, and no part of it is shown (liminal-libs 1.49.2 scrubs a secret's lines too).
+- The power dialog says that powering a Droplet on starts no new charge (it was billed while off): asked once.
+- The SSH key form says never to paste the private key (liminal-platform 0.20.1 logs no form's values).
+
+Left as they are, as the user's calls: the account read every quarter of an hour while the platform has it attached,
+and the variable DIGITALOCEAN_TOKEN, which Terraform and PyDo read too.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "ALSO i would like to add two new plugins, Digital Ocean and LINODE"; for the cloud plugins

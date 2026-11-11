@@ -5,13 +5,15 @@ volumes, the SSH keys, the reserved IPs, and how many of the other kinds it hold
 each change confirmed on the page first: a Droplet powered on, shut down or rebooted (a hard power-off or power cycle asked
 twice: unsaved data is lost), a DNS record set or removed (every other record kept), a cloud firewall's rule added or
 removed (a risky one asked twice), an SSH key added or removed; and Dynamic DNS, keeping hosts at this network's public
-IPv4 address through DigitalOcean's DNS. Nothing that starts a charge: no Droplet, volume, snapshot, backup or reserved
-IP is made, nothing is resized or destroyed. A powered-off Droplet still bills, and the page says so.
+IPv4 address through DigitalOcean's DNS (only what is its own: a host holding another address is left as it is until it
+is taken over on the page). Nothing that starts a charge: no Droplet, volume, snapshot, backup or reserved IP is made,
+nothing is resized or destroyed. A powered-off Droplet still bills, and the page says so.
 
 Its settings are pairs asked of the login of the app it is attached to (settings.py: DIGITALOCEAN_TOKEN,
-DIGITALOCEAN_DDNS_HOSTS, DIGITALOCEAN_DDNS_MINUTES), never a file of its own. While attached to the platform app it reads
-the account every quarter of an hour and keeps the Dynamic DNS hosts every few minutes in a thread of its own; detached,
-nothing of it runs. Its status is what was read last (no request is made to answer it): the platform's page draws its
+DIGITALOCEAN_DDNS_HOSTS, DIGITALOCEAN_DDNS_MINUTES), never a file of its own. While the platform app has it attached it
+reads the account every quarter of an hour and keeps the Dynamic DNS hosts every few minutes in a thread of its own
+(another app attaching it starts none of it); detached, nothing of it runs. A second confirmation counts only when it is
+exactly true (an audit, 2026-11-11: 0.1.1). Its status is what was read last (no request is made to answer it): the platform's page draws its
 tables, its actions (Refresh, Update DNS now) and its forms. What it attaches to is its API card (card.py: plugin API 2.2).
 
     python -m plugin_platform_digitalocean status | servers | domains | records DOMAIN | ddns [--now] | firewalls | keys
@@ -21,11 +23,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 import threading
 import time
+from pathlib import Path
 
-from liminal_libs.machines.ddns import Keeper
+from liminal_libs.machines.ddns import NOW_FORM, Keeper
 from liminal_libs.machines.plugin import MachinePlugin
 from liminal_libs.machines.rest import RestError
 
@@ -37,15 +41,18 @@ from . import settings as settings_mod
 from .api import COUNTS, HARD, POWER, DigitalOceanApi
 from .card import APIS, NAME as API_NAME, READ_SCOPES, TOKENS, WRITE_SCOPES
 from .errors import Refusal
-from .page import ACCEPT_HARD, ACCEPT_RISKY, BILLING, plural, when
+from .page import ACCEPT_HARD, ACCEPT_REPLACE, ACCEPT_RISKY, BILLING, plural, when
 from .settings import DDNS_HOSTS, KEYS, NAMES, TOKEN, Config
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a read that failed is taken as untried after this long while detached: attached again, it is tried again
 ZONES_MAX = 12  # the domains whose records a refresh reads (the rest: `records DOMAIN`)
 SOON_S = 30.0  # the Droplets read again this long after a power action, while attached
+STOP_WAIT_S = 10.0  # how long a detach waits for the background to end (it ends at its next step regardless)
+DIR_VAR = "LIMINAL_PLATFORM_DIR"  # the platform's own folder (its app's variable): the Dynamic DNS state goes under it
+PLATFORM = "platform"  # the app whose attaching starts the background (App.NAME): no other app's does
 SCOPES_WORDS = (f"Custom Scopes limited to the reads ({', '.join(READ_SCOPES)}) and the free changes' writes "
                 f"({', '.join(WRITE_SCOPES)})")
 NOT_SET = f"not set up: {TOKEN}, a personal access token made at {TOKENS} (Generate New Token; {SCOPES_WORDS})"
@@ -68,6 +75,32 @@ DOMAIN = re.compile(r"^(?=.{3,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-
 def shorten(text, most: int = 200) -> str:
     t = " ".join(str(text).split())
     return t if len(t) <= most else t[: most - 1] + "…"
+
+
+def ddns_state() -> Path:
+    """Where Dynamic DNS keeps what is its own (liminal-libs 1.49.2: the addresses it set, the hosts the user let it take
+    over): the platform's folder's digitalocean/ddns.json (LIMINAL_PLATFORM_DIR, else the data folder's platform/)."""
+    named = (os.environ.get(DIR_VAR) or "").strip()
+    if named:
+        return Path(named).expanduser() / "digitalocean" / "ddns.json"
+    from liminal_libs import layout
+
+    return layout.data_dir() / "platform" / "digitalocean" / "ddns.json"
+
+
+def exactly(value) -> bool:
+    """A second confirmation as the page sends it: JSON true, and nothing else ("false", "yes" or 1 from another program
+    is no confirmation)."""
+    return value is True
+
+
+def typed_hosts(cfg: Config) -> set[str]:
+    """The Dynamic DNS hosts as typed in the settings, by their full names (@.example.com is example.com)."""
+    out = set()
+    for text in cfg.hosts:
+        name = str(text).strip().rstrip(".").lower()
+        out.add(name[2:] if name.startswith("@.") else name)
+    return {n for n in out if n}
 
 
 def with_gpus(droplets: list[dict], gpus: list[dict] | None) -> list[dict]:
@@ -117,6 +150,7 @@ class _Runtime:
         self.wake = threading.Event()
         self.refreshing = threading.Lock()
         self.soon: float | None = None  # when the Droplets are read again (a power action asked: monotonic time)
+        self.typed: set[str] | None = None  # the Dynamic DNS hosts set when last kept (a host taken out is let go)
 
     def clear(self) -> None:
         """What was read, forgotten (another token)."""
@@ -147,16 +181,17 @@ class DigitalOceanPlugin(MachinePlugin):
     ICON = "digitalocean"  # DigitalOcean's mark (liminal-libs 1.49.0's icons.js)
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "droplets", "domains", "records", "firewalls", "ssh_keys", "balance", "power",
              "set_record", "remove_record", "add_firewall_rule", "remove_firewall_rule", "add_ssh_key", "remove_ssh_key",
-             "ddns_update")
+             "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = TOKENS
     limits = ("DigitalOcean's API: 5,000 requests an hour and 250 a minute per token; a refresh asks about 20 to 30 every "
               "quarter of an hour, a Dynamic DNS check one a host")
     apis = APIS
 
-    def __init__(self, transport=None, public=None, clock=None, sleep=None):
+    def __init__(self, transport=None, public=None, clock=None, sleep=None, state: Path | None = None):
         self._transport = transport  # (method, url, headers, body, timeout) -> (status, headers, body): a test's; else HTTPS
         self._public = public  # () -> (address, whose): a test's; else DNS asked (PUBLIC_IPV4)
+        self._state = Path(state) if state is not None else None  # Dynamic DNS's state file: a test's; else ddns_state()
         self._clock = clock or time.time
         self._sleep = sleep or time.sleep
         self._rt = _Runtime()
@@ -169,6 +204,8 @@ class DigitalOceanPlugin(MachinePlugin):
             kept = self._rt.config
         if kept is not None and not fresh and now - kept[0] < CONFIG_S:
             return kept[1]
+        if self._gone():  # the background run on past its detach: no login asked, none of the environment read
+            return kept[1] if kept is not None else Config()
         cfg = settings_mod.read(self.login)
         with self._rt.lock:
             self._rt.config = (now, cfg)
@@ -195,14 +232,28 @@ class DigitalOceanPlugin(MachinePlugin):
             self._rt.api = (cfg.api_print, made)
         return made
 
+    @staticmethod
+    def _gone() -> bool:
+        """Whether this is the background thread run on past its plugin's detach (its stop set)."""
+        stop = getattr(threading.current_thread(), "liminal_stop", None)
+        return stop is not None and stop.is_set()
+
+    @property
+    def state_path(self) -> Path:
+        return self._state if self._state is not None else ddns_state()
+
     def keeper(self) -> Keeper:
+        """Dynamic DNS's keeper (liminal-libs 1.49.2): it changes only what is its own, kept in its state file."""
         with self._rt.lock:
             if self._rt.keeper is None:
                 self._rt.keeper = Keeper(read=lambda h: ddns_mod.read(self.client(), h), write=self._ddns_write,
-                                         servers=ddns_mod.PUBLIC_IPV4, public=self._public, clock=self._clock)
+                                         servers=ddns_mod.PUBLIC_IPV4, public=self._public, clock=self._clock,
+                                         state=self.state_path)
             return self._rt.keeper
 
     def _ddns_write(self, host, ip: str) -> str:
+        if self._gone():  # detached while the pass asked this network's address again: nothing written
+            raise RuntimeError("the plugin was detached: nothing written")
         done = ddns_mod.write(self.client(), host, ip)
         self._reread_records(host.zone)
         return done
@@ -400,7 +451,7 @@ class DigitalOceanPlugin(MachinePlugin):
             can = ", ".join(page.POWER[a][0].lower() for a in allowed) or "nothing"
             raise Refusal(f"{real} is {page.STATES.get(state, state or 'in no known state')}: it can be {can} here, not "
                           f"{title.lower()}")
-        if act in HARD and not accept_hard:
+        if act in HARD and not exactly(accept_hard):
             raise Refusal(f"{title} cuts {real}'s power at once: unsaved data is lost (whatever it has not written to "
                           "disk). DigitalOcean advises a shutdown first and a power-off only when that does not work; it "
                           "is asked only once that is accepted (accept_hard)", accept=ACCEPT_HARD)
@@ -420,9 +471,11 @@ class DigitalOceanPlugin(MachinePlugin):
                 "action": got}
 
     def set_record(self, domain: str, name: str, rtype: str, data: str, ttl=None, priority=None, port=None, weight=None,
-                   flags=None, tag=None) -> dict:
+                   flags=None, tag=None, accept_replace: bool = False) -> dict:
         """A record set in `domain` (records.plan_set over the records at its name read now): made, or changed in place;
-        every other record is kept, since none is sent."""
+        every other record is kept, since none is sent. A change of what a record holds (an A, AAAA or CNAME set over
+        another value) is refused unless accepted (`accept_replace`: the page's second confirmation, after the refusal
+        naming what it holds)."""
         d = self._domain(domain)
         n = recmod.relative_name(name, d)
         api = self.client()
@@ -433,6 +486,12 @@ class DigitalOceanPlugin(MachinePlugin):
                                  flags=flags, tag=tag, default_ttl=default)
         if change.op == "none":
             return {"domain": d, "said": change.said, "lines": [], "ok": True, "changed": False}
+        was = change.was or {}
+        if change.op == "update" and not recmod.same_data(change.body["type"], was.get("data"), change.body["data"]) \
+                and not exactly(accept_replace):
+            raise Refusal(f"{recmod.said(was)} is there now: setting {change.body['name']} {change.body['type']} to "
+                          f"{change.body['data']} replaces it, in place. It is set only once that is accepted "
+                          "(accept_replace)", accept=ACCEPT_REPLACE)
         got = api.create_record(d, change.body) if change.op == "create" else api.update_record(d, change.record_id, change.body)
         self._reread_records(d)
         return {"domain": d, "said": change.said, "ok": True, "changed": True, "record": got,
@@ -486,10 +545,16 @@ class DigitalOceanPlugin(MachinePlugin):
             return {"said": f"{fw.get('name')} holds this rule already: nothing sent", "lines": [key], "ok": True,
                     "changed": False}
         risk = fwmod.risk_of_add(d, rule, fw)
-        if risk and not accept_risky:
+        if risk and not exactly(accept_risky):
             raise Refusal(f"{key}: {risk}. It is added only once that is accepted (accept_risky)", accept=ACCEPT_RISKY)
+        twin = fwmod.key_of(d, {**rule, "action": "allow"})  # the rule as an allow: what a deny taken wrongly would be
+        had_twin = any(fwmod.key_of(d, r) == twin for r in fw.get(fwmod.rules_key(d)) or [])
         api.add_rules(fw["id"], [rule] if d == "inbound" else [], [rule] if d == "outbound" else [])
-        self._reread_firewalls()
+        after = self._reread_firewalls()
+        if rule["action"] == "deny" and after is not None:
+            undone = self._undo_allowed_deny(api, fw, d, key, twin, had_twin, after)
+            if undone is not None:
+                return undone
         return {"said": f"added to {fw.get('name')}: {key}", "ok": True, "changed": True, "rule": rule,
                 "lines": [*([f"accepted: {risk}"] if risk else []),
                           f"{fw.get('name')}'s other rules, Droplets and tags are kept as they were (none was sent)"]}
@@ -505,7 +570,7 @@ class DigitalOceanPlugin(MachinePlugin):
         fw = self._firewall(api, firewall_id, firewall)
         r = fwmod.find(fw, d, str(rule or "").strip())
         risk = fwmod.risk_of_remove(d, r, fw)
-        if risk and not accept_risky:
+        if risk and not exactly(accept_risky):
             raise Refusal(f"{rule}: {risk}. It is removed only once that is accepted (accept_risky)", accept=ACCEPT_RISKY)
         api.remove_rules(fw["id"], [r] if d == "inbound" else [], [r] if d == "outbound" else [])
         self._reread_firewalls()
@@ -513,11 +578,29 @@ class DigitalOceanPlugin(MachinePlugin):
                 "lines": [*([f"accepted: {risk}"] if risk else []),
                           f"{fw.get('name')}'s other rules, Droplets and tags are kept as they were (none was sent)"]}
 
-    def _reread_firewalls(self) -> None:
+    def _undo_allowed_deny(self, api, fw, d: str, key: str, twin: str, had_twin: bool, after: list[dict]) -> dict | None:
+        """A deny rule read back as an allow (DigitalOcean taking it without its action would open what it was to shut):
+        removed again at once, and said; None when the deny is there as asked."""
+        now = next((f for f in after if str(f.get("id")) == str(fw["id"])), None) or {}
+        held = now.get(fwmod.rules_key(d)) or []
+        if any(fwmod.key_of(d, r) == key for r in held) or had_twin:
+            return None
+        wrong = next((dict(r) for r in held if fwmod.key_of(d, r) == twin), None)
+        if wrong is None:
+            return {"said": f"{fw.get('name')} does not show the deny rule after it was added", "ok": False,
+                    "changed": True, "lines": [key, "read the firewall again (Refresh) before relying on it"]}
+        api.remove_rules(fw["id"], [wrong] if d == "inbound" else [], [wrong] if d == "outbound" else [])
+        self._reread_firewalls()
+        return {"said": f"DigitalOcean took the deny rule as an allow: it was removed from {fw.get('name')} again",
+                "ok": False, "changed": False,
+                "lines": [f"asked: {key}", f"read back: {twin}, which lets in what the deny was to shut out",
+                          "removed again at once; the firewall holds its rules as before"]}
+
+    def _reread_firewalls(self) -> list[dict] | None:
         try:
-            self.firewalls()
+            return self.firewalls()
         except (RestError, ValueError):
-            pass
+            return None
 
     def add_ssh_key(self, name: str, public_key: str) -> dict:
         """A public key added to the account's SSH keys (new Droplets can be made with it; none is changed)."""
@@ -559,6 +642,7 @@ class DigitalOceanPlugin(MachinePlugin):
         if zones is None:
             zones = [str(x.get("name") or "").lower() for x in self.domains()]
         hosts, wrong = cfg.ddns_hosts(zones)
+        self._let_go(cfg)
         if not hosts:
             raise ValueError("no Dynamic DNS host is in the account's domains: " + ("; ".join(wrong) or "none is set"))
         out = self.keeper().run_pass(hosts, force=bool(force))
@@ -566,14 +650,48 @@ class DigitalOceanPlugin(MachinePlugin):
             self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
         return out
 
+    def ddns_take_over(self, host: str, holds=None) -> dict:
+        """A Dynamic DNS host holding another address taken over (the page's Take over…, once confirmed: the record
+        holds `holds`, which the confirmation named), then a pass for it: its A record pointed at this network."""
+        cfg = self.config(fresh=True)
+        if not cfg.ddns_ready:
+            raise ValueError(f"Dynamic DNS is not set up: {TOKEN} and {DDNS_HOSTS}")
+        zones = self.zones()
+        if zones is None:
+            zones = [str(x.get("name") or "").lower() for x in self.domains()]
+        hosts, _ = cfg.ddns_hosts(zones)
+        fqdn = str(host or "").strip().rstrip(".").lower()
+        h = next((x for x in hosts if x.fqdn == fqdn), None)
+        if h is None:
+            raise Refusal(f"{fqdn or 'no host'} is not one of the Dynamic DNS hosts ({DDNS_HOSTS}) in the account's domains")
+        now = ddns_mod.read(self.client(), h)
+        if holds is not None and ", ".join(now) != str(holds).strip():
+            raise Refusal(f"{fqdn} holds {', '.join(now) or 'no A record'} now, not {holds}: nothing taken over (the page "
+                          "is read again)")
+        keeper = self.keeper()
+        keeper.take_over(fqdn)
+        (state,) = keeper.run_pass([h], force=False) or [{}]
+        return {"said": f"{fqdn} taken over for Dynamic DNS", "ok": bool(state.get("ok")), "changed": True,
+                "lines": [f"it held {', '.join(now) or 'no A record'}", state.get("result") or "checked on the next pass"]}
+
+    def _let_go(self, cfg: Config) -> None:
+        """The hosts taken out of the settings since they were last kept: no longer Dynamic DNS's own (let_go)."""
+        typed = typed_hosts(cfg)
+        with self._rt.lock:
+            before, self._rt.typed = self._rt.typed, typed
+        for fqdn in sorted((before or set()) - typed):
+            self.keeper().let_go(fqdn)
+
     # -- attached: the reading in the background ----------------------------------------------------------------------------
     def attach(self, app, login=None) -> dict:
-        """Attached by the platform: its settings asked of the platform's login from now on; the account read and the
-        Dynamic DNS hosts kept in the background."""
+        """Attached: its settings asked of the app's login from now on. By the platform alone (App.NAME "platform"), the
+        account read and the Dynamic DNS hosts kept in the background; another app attaching it (the charts app run
+        alone attaches every plugin it finds) starts nothing."""
         interface = super().attach(app, login)
         with self._rt.lock:
             self._rt.config = None
-        self._start()
+        if getattr(app, "NAME", "") == PLATFORM:
+            self._start()
         return interface
 
     def detach(self) -> None:
@@ -595,6 +713,7 @@ class DigitalOceanPlugin(MachinePlugin):
                 return
             stop = threading.Event()
             t = threading.Thread(target=self._work, args=(stop,), name="digitalocean", daemon=True)
+            t.liminal_stop = stop  # its stop, as _gone() reads it: set, the thread asks no login and writes nothing
             self._rt.worker, self._rt.stop = t, stop
             self._rt.wake.clear()
         t.start()
@@ -607,7 +726,7 @@ class DigitalOceanPlugin(MachinePlugin):
             stop.set()
             self._rt.wake.set()
         if t is not None and t is not threading.current_thread():
-            t.join(timeout=10)
+            t.join(timeout=STOP_WAIT_S)
 
     def _work(self, stop: threading.Event) -> None:
         """The background: the account read every REFRESH_S, the Droplets again soon after a power action, the Dynamic DNS
@@ -618,7 +737,7 @@ class DigitalOceanPlugin(MachinePlugin):
             cfg = None
             try:
                 cfg = self.config()
-                if cfg.api_ready and now >= next_api:
+                if cfg.api_ready and now >= next_api and not stop.is_set():
                     next_api = now + REFRESH_S
                     if self._rt.refreshing.acquire(blocking=False):  # Refresh asked meanwhile: that one is enough
                         try:
@@ -629,17 +748,18 @@ class DigitalOceanPlugin(MachinePlugin):
                             self._rt.refreshing.release()
                 with self._rt.lock:
                     soon = self._rt.soon
-                if cfg.api_ready and soon is not None and time.monotonic() >= soon:
+                if cfg.api_ready and soon is not None and time.monotonic() >= soon and not stop.is_set():
                     with self._rt.lock:
                         self._rt.soon = None
                     self._reread_droplets()
                 zones = self.zones()
-                if cfg.ddns_ready and zones is not None and now >= next_ddns:
+                if cfg.ddns_ready and zones is not None and now >= next_ddns and not stop.is_set():
                     next_ddns = now + cfg.minutes * 60.0
                     hosts, _ = cfg.ddns_hosts(zones)
+                    self._let_go(cfg)
                     if hosts:
                         try:
-                            self.keeper().run_pass(hosts, force=False, wait=0.5)
+                            self.keeper().run_pass(hosts, force=False, wait=0.5, stop=stop)
                             with self._rt.lock:
                                 self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
                         except Exception:  # noqa: BLE001 - a pass under way (Update DNS now), or its trouble kept by the hosts
@@ -683,7 +803,8 @@ class DigitalOceanPlugin(MachinePlugin):
         if not cfg.present:
             return {"present": False, "valid": False, "why": NOT_SET, "summary": "not set up",
                     "settingsNotSet": ", ".join(NAMES), "tables": [], "actions": [], "forms": []}
-        rt, now, attached = self._rt, self._clock(), self.app is not None
+        rt, now = self._rt, self._clock()
+        attached = self.app is not None and getattr(self.app, "NAME", "") == PLATFORM  # only the platform's attach reads
         with rt.lock:
             account, balance, droplets, domains = rt.account, rt.balance, rt.droplets, rt.domains
             records, firewalls, volumes, keys, reserved = dict(rt.records), rt.firewalls, rt.volumes, rt.keys, rt.reserved
@@ -693,8 +814,9 @@ class DigitalOceanPlugin(MachinePlugin):
         out: dict = {"present": True}
         settings_set = ", ".join(n for n in NAMES if n in cfg.present)
         missing = [n for n in NAMES if n not in cfg.present]
-        if not cfg.api_ready:
-            return {"present": True, "valid": False, "why": "; ".join(cfg.incomplete) + f" ({NOT_SET})",
+        if not cfg.api_ready:  # the hosts without the token, or a token that cannot be sent (a line break in it)
+            said = [*cfg.problems, *cfg.incomplete]
+            return {"present": True, "valid": False, "why": ("; ".join(said) + f" ({NOT_SET})") if said else NOT_SET,
                     "summary": "set up halfway", "settingsSet": settings_set, "settingsNotSet": ", ".join(missing),
                     "tables": [], "actions": [], "forms": []}
         works = api_ok if api_print == cfg.api_print else None
@@ -753,9 +875,9 @@ class DigitalOceanPlugin(MachinePlugin):
         out["forms"] = self._forms(writable, droplets, domains, records, firewalls, keys)
         out["actions"] = [{"hook": "refresh", "args": [], "title": "Refresh",
                            "note": "the account read again now (about 20 to 30 requests)"}] + \
-                         ([{"hook": "ddns_update", "args": [], "title": "Update DNS now",
-                            "note": "every Dynamic DNS host's A record set now to this network's address"}]
-                          if cfg.ddns_ready else [])
+                         ([{"form": NOW_FORM, "title": "Update DNS now"}] if cfg.ddns_ready else [])
+        if cfg.ddns_ready:  # Update DNS now, confirmed; a host holding another address taken over, confirmed
+            out["forms"] += [self.keeper().now_form(), self.keeper().take_form()]
         return out
 
     def _summary(self, works, error, attached, droplets, domains, balance, hosts, states, cfg) -> str:
@@ -789,12 +911,9 @@ class DigitalOceanPlugin(MachinePlugin):
         out = []
         names = page.droplet_names(droplets or [])
         if cfg.ddns_ready:
-            table = self.keeper().table(hosts, cfg.minutes, attached)
-            if zones is None:
-                table["empty"] = "The hosts are checked once the account's domains are read."
-            elif not hosts:
-                table["empty"] = f"None of the hosts in {DDNS_HOSTS} is in the account's domains."
-            out.append(table)
+            empty = ("The hosts are checked once the account's domains are read." if zones is None else
+                     f"None of the hosts in {DDNS_HOSTS} is in the account's domains." if not hosts else None)
+            out.append(self.keeper().table(hosts, cfg.minutes, attached, empty=empty, take=True))
         if droplets is not None:
             out.append(page.droplets_table(droplets, read_at, writable))
         if domains is not None:
