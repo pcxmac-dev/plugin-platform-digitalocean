@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plugin-platform-digitalocean"
+version = "0.1.0"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+description = "DigitalOcean for Liminal's platform: the account through DigitalOcean's API (Droplets with their prices, domains and records, cloud firewalls, volumes, SSH keys, reserved IPs), only the changes that cost nothing, each confirmed, and Dynamic DNS through DigitalOcean's DNS."
+readme = "README.md"
+requires-python = ">=3.10"
+# the library it plugs into (the machine kind and its REST client and Dynamic DNS: liminal_libs.machines; plugin API 2.2:
+# liminal_libs.sources.apis; the Login interface: liminal_libs.apps); its HTTPS is the library's (requests)
+dependencies = ["liminal-libs>=1.49.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.entry-points."liminal.providers"]
+digitalocean = "plugin_platform_digitalocean"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
