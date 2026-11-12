@@ -14,6 +14,10 @@ What the re-verification of the audit's fixes found in Dynamic DNS (liminal-libs
   background, once the account's domains are read, and only when the login answered with the token among what it
   furnished (a login that cannot be asked, or one signed out, lets nothing go). Put back later, the host is not its
   own: a record it set is left as it is, its row offering Take over… again.
+- The third round of checks (liminal-libs 1.49.8, needed now): a take-over is single-use, used up once its write lands
+  (the host is then the keeper's own); and only the serving platform's plugin settles, never its own command line or
+  the platform's one-shot commands, whose setting may lack the hosts (they would empty the shared `ddns.json`). The
+  guard comes before the settle's bookkeeping, so a settle not made is never marked as made.
 
 What the audit of the cloud plugins found before any key went in (session 87405e6a: eight reviewers, a skeptic per
 finding; its DigitalOcean section: 2 blockers, 6 should-fix, 4 minor). Needs liminal-libs>=1.49.2.

@@ -677,13 +677,21 @@ class DigitalOceanPlugin(MachinePlugin):
         return {"said": f"{fqdn} taken over for Dynamic DNS", "ok": bool(state.get("ok")), "changed": True,
                 "lines": [f"it held {', '.join(now) or 'no A record'}", state.get("result") or "checked on the next pass"]}
 
+    def _serving(self) -> bool:
+        """Whether the platform serving its page has it attached (not a one-shot command of the platform's, not another
+        app, not the plugin's own command line, whose shell's setting may lack the hosts)."""
+        app = self.app
+        return app is not None and getattr(app, "NAME", "") == PLATFORM and not getattr(app, "once", False)
+
     def _settle(self, cfg: Config, zones) -> None:
         """Every host the keeper holds that the Dynamic DNS setting no longer names let go (Keeper.settle, liminal-libs
-        1.49.7), so a host taken out of the setting, while the plugin ran or not, comes back as not its own. Only with the
-        whole setting: the login answered (`read_ok`) with the token among what it furnished (a signed-out login furnishes
-        nothing), not after a detach, and once the account's domains are read when the setting names a host; each
-        setting settled once."""
-        if not cfg.read_ok or TOKEN not in cfg.present or self._gone():
+        1.49.7), so a host taken out of the setting, while the plugin ran or not, comes back as not its own. Only by the
+        serving platform's plugin (FIX3: the plugin's own command line, from a shell lacking the hosts, would empty the
+        shared state), with the whole setting: the login answered (`read_ok`) with the token among what it furnished (a
+        signed-out login furnishes nothing), not after a detach, and once the account's domains are read when the setting
+        names a host; each setting settled once. Every guard comes before the bookkeeping, so a settle not made is never
+        marked as made."""
+        if not self._serving() or not cfg.read_ok or TOKEN not in cfg.present or self._gone():
             return
         typed = frozenset(typed_hosts(cfg))
         if typed and zones is None:

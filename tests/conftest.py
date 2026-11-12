@@ -346,9 +346,12 @@ def env(monkeypatch):
 
 @pytest.fixture
 def made():
-    """A plugin over the stand-ins: (plugin, fake DigitalOcean); this network's address HOME unless `public` says."""
-    def make(fake: FakeDigitalOcean | None = None, public=None):
+    """A plugin over the stand-ins: (plugin, fake DigitalOcean); this network's address HOME unless `public` says;
+    `serving`: held by a stand-in serving platform, as its attach leaves it (its app), without its background thread."""
+    def make(fake: FakeDigitalOcean | None = None, public=None, serving: bool = False):
         fake = fake or FakeDigitalOcean()
         p = DigitalOceanPlugin(transport=fake, public=public or (lambda: (HOME, "OpenDNS")), sleep=lambda s: None)
+        if serving:
+            p.app = Platform()
         return p, fake
     return make

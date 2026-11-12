@@ -11,7 +11,8 @@ import threading
 
 import pytest
 
-from conftest import HOME, FakeDigitalOcean, Pairs, record, settings_of
+import plugin_platform_digitalocean.__main__ as cli
+from conftest import HOME, FakeDigitalOcean, Pairs, Platform, record, settings_of
 from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_digitalocean import DigitalOceanPlugin
 
@@ -177,19 +178,20 @@ def test_take_over_is_asked_twice_and_only_an_exact_true_takes_it(made, env):
             p.ask("ddns_take_over", "www.example.com", "203.0.113.10", not_yes)
     assert not keeper.taken("www.example.com") and fake.writes() == []  # nothing taken
     rep = p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
-    assert keeper.taken("www.example.com") and rep["ok"] is True
+    assert keeper.own("www.example.com") == HOME and rep["ok"] is True  # taken, written: the consent used up, its own now
+    assert not keeper.taken("www.example.com")
     assert a_writes(fake) == [("PUT", "/v2/domains/example.com/records/15",
                                {"type": "A", "name": "www", "data": HOME, "ttl": 3600})]
 
 
 def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go_and_left_as_it_is_once_back(made, env, monkeypatch):
     env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="home.example.com, www.example.com"))
-    p, fake = made()
+    p, fake = made(serving=True)
     p.refresh()
     p.ddns_update(force=False)
     p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
     keeper = p.keeper()
-    assert keeper.own("home.example.com") == HOME and keeper.taken("www.example.com")
+    assert keeper.own("home.example.com") == HOME and keeper.own("www.example.com") == HOME  # taken over: its own
     monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com")
     p.settings_changed()
     p.ddns_update(force=False)  # the next pass: settled with the whole setting
@@ -197,7 +199,7 @@ def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go_and_left_as_i
     assert keeper.own("home.example.com") == HOME
     writes = len(fake.writes())
     monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com, www.example.com")  # put back later, the network's
-    q, _ = made(fake, public=lambda: (NEW, "OpenDNS"))  # address changed meanwhile (the platform started again)
+    q, _ = made(fake, public=lambda: (NEW, "OpenDNS"), serving=True)  # address changed meanwhile (started again)
     q.refresh()
     hosts = {h["host"]: h for h in q.ddns_update(force=False)}
     www = hosts["www.example.com"]
@@ -213,18 +215,18 @@ def test_a_host_taken_out_of_the_setting_while_the_plugin_was_not_running_is_let
     p.refresh()
     p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
     monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com")  # changed while the platform was not running
-    q, _ = made(fake)
+    q, _ = made(fake, serving=True)
     keeper = q.keeper()
-    assert keeper.taken("www.example.com")  # its state file still says so
+    assert keeper.own("www.example.com") == HOME  # its state file still says so
     q._settle(q.config(), q.zones())  # the account's domains not read yet: nothing let go (never an unread list)
-    assert keeper.taken("www.example.com")
+    assert keeper.own("www.example.com") == HOME
     q.refresh()  # read: settled with the whole setting
-    assert not keeper.taken("www.example.com") and keeper.known() == []  # www no longer its own, nor taken
+    assert keeper.own("www.example.com") is None and keeper.known() == []  # www no longer its own, nor taken
 
 
 def test_a_setting_that_could_not_be_read_whole_lets_nothing_go(made, env):
     env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="www.example.com"))
-    p, fake = made()
+    p, fake = made(serving=True)
     p.refresh()
     p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
     keeper = p.keeper()
@@ -236,7 +238,31 @@ def test_a_setting_that_could_not_be_read_whole_lets_nothing_go(made, env):
         p.login = login
         p.settings_changed()
         p._settle(p.config(), p.zones())
-        assert keeper.taken("www.example.com")
+        assert keeper.own("www.example.com") == HOME
+
+
+def test_only_the_serving_platform_settles(made, env, monkeypatch, tmp_path):
+    """The plugin's own command line runs from a shell whose setting may lack the hosts: unattached, or attached by one
+    of the platform's one-shot commands, with the setting emptied it lets nothing go (the shared state kept); the serving
+    platform's plugin lets go as before, its earlier skipped settles never marked as made."""
+    env(settings_of(ddns=True))
+    p, fake = made()
+    p.refresh()
+    p.ddns_update(force=False)  # home.example.com made: its own
+    keeper = p.keeper()
+    assert keeper.own("home.example.com") == HOME
+    monkeypatch.delenv("DIGITALOCEAN_DDNS_HOSTS")  # a shell without the hosts
+    p.settings_changed()
+    assert cli.main(["status"], plugin=p, out=lambda s: None, err=lambda s: None) == 0  # its command line: a refresh
+    p.refresh()
+    p.app = type("Once", (), {"NAME": "platform", "once": True})()  # the platform's status command
+    p.refresh()
+    assert keeper.own("home.example.com") == HOME  # kept
+    state = json.loads((tmp_path / "platform" / "digitalocean" / "ddns.json").read_text(encoding="utf-8"))
+    assert state["own"] == {"home.example.com": HOME}
+    p.app = Platform()  # the serving platform
+    p.refresh()
+    assert keeper.own("home.example.com") is None and keeper.known() == []  # the setting emptied: let go, as before
 
 
 def test_hosts_in_none_of_the_accounts_domains_are_said_and_the_page_draws_the_rest(made, env):

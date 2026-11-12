@@ -85,8 +85,10 @@ name.
 - Just before a write the address is asked again: a stale one is never written back. **Update DNS now** is confirmed
   first, and sets every host of its own (never one that is not). A host taken out of the setting is let go, whether
   the plugin ran or not when it was taken out (the keeper settled with the whole setting, once the account's domains
-  are read): put back later, it is not its own, and a record it set is left as it is until taken over again. Once the
-  plugin is detached, a pass under way writes nothing more.
+  are read): put back later, it is not its own, and a record it set is left as it is until taken over again. A
+  take-over is used up once its write lands (the host is then its own). Only the platform serving the page settles:
+  the plugin's own command line, whose shell may lack the setting, never lets a host go. Once the plugin is detached, a
+  pass under way writes nothing more.
 
 The domain's registrar must name DigitalOcean's name servers (ns1, ns2 and ns3.digitalocean.com) for the record to be
 the one the world sees.
