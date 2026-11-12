@@ -33,7 +33,7 @@ def test_it_conforms_to_the_class_contract_for_plugin_api_2_2():
     assert {(p.name, p.title, p.order, p.ICON) for p in found} == {("digitalocean", "DigitalOcean", 760, "digitalocean")}
     assert module.__version__ == "0.1.2"
     text = (PACKAGE.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-    assert re.search(r'^version = "0\.1\.2"', text, re.M) and '"liminal-libs>=1.49.8"' in text
+    assert re.search(r'^version = "0\.1\.2"', text, re.M) and '"liminal-libs>=1.49.9"' in text
 
 
 def test_its_settings_are_pairs_named_by_their_variables_and_only_the_token_is_secret():
