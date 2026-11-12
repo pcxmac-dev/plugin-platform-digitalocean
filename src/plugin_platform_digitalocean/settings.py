@@ -46,6 +46,7 @@ class Config:
     minutes: float = MINUTES[2]
     present: frozenset = frozenset()
     problems: tuple[str, ...] = ()
+    read_ok: bool = True  # the login answered: the settings as read are the whole setting (False: it could not be asked)
 
     @property
     def api_ready(self) -> bool:
@@ -114,5 +115,5 @@ def read(login: Login | None = None) -> Config:
     try:
         values = asked.variables(NAMES)
     except Exception as e:  # noqa: BLE001 - a login that cannot be asked: nothing set, and why
-        return Config(problems=(f"the settings could not be read from the login: {type(e).__name__}",))
+        return Config(problems=(f"the settings could not be read from the login: {type(e).__name__}",), read_ok=False)
     return parse(values)

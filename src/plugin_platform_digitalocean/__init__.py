@@ -44,7 +44,7 @@ from .errors import Refusal
 from .page import ACCEPT_HARD, ACCEPT_REPLACE, ACCEPT_RISKY, BILLING, plural, when
 from .settings import DDNS_HOSTS, KEYS, NAMES, TOKEN, Config
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a read that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -150,7 +150,7 @@ class _Runtime:
         self.wake = threading.Event()
         self.refreshing = threading.Lock()
         self.soon: float | None = None  # when the Droplets are read again (a power action asked: monotonic time)
-        self.typed: set[str] | None = None  # the Dynamic DNS hosts set when last kept (a host taken out is let go)
+        self.settled: frozenset | None = None  # the Dynamic DNS setting the keeper was last settled with (Keeper.settle)
 
     def clear(self) -> None:
         """What was read, forgotten (another token)."""
@@ -205,7 +205,7 @@ class DigitalOceanPlugin(MachinePlugin):
         if kept is not None and not fresh and now - kept[0] < CONFIG_S:
             return kept[1]
         if self._gone():  # the background run on past its detach: no login asked, none of the environment read
-            return kept[1] if kept is not None else Config()
+            return kept[1] if kept is not None else Config(read_ok=False)
         cfg = settings_mod.read(self.login)
         with self._rt.lock:
             self._rt.config = (now, cfg)
@@ -348,6 +348,8 @@ class DigitalOceanPlugin(MachinePlugin):
             rt.records, rt.firewalls, rt.volumes, rt.keys, rt.reserved = records, firewalls, volumes, keys, reserved
             rt.counts, rt.troubles, rt.refreshed_at = counts, troubles, now
             rt.api_ok, rt.api_error, rt.api_error_at, rt.api_print = True, "", None, cfg.api_print
+        if domains is not None:  # the whole setting known, the account's domains read: what is no longer in it let go
+            self._settle(cfg, [str(d.get("name") or "").lower() for d in domains])
         return {"droplets": len(droplets or []), "domains": len(domains or []), "firewalls": len(firewalls or []),
                 "refreshedAt": when(now)}
 
@@ -642,7 +644,7 @@ class DigitalOceanPlugin(MachinePlugin):
         if zones is None:
             zones = [str(x.get("name") or "").lower() for x in self.domains()]
         hosts, wrong = cfg.ddns_hosts(zones)
-        self._let_go(cfg)
+        self._settle(cfg, zones)
         if not hosts:
             raise ValueError("no Dynamic DNS host is in the account's domains: " + ("; ".join(wrong) or "none is set"))
         out = self.keeper().run_pass(hosts, force=bool(force))
@@ -650,9 +652,10 @@ class DigitalOceanPlugin(MachinePlugin):
             self._rt.ddns_print, self._rt.ddns_at = cfg.ddns_print, self._clock()
         return out
 
-    def ddns_take_over(self, host: str, holds=None) -> dict:
-        """A Dynamic DNS host holding another address taken over (the page's Take over…, once confirmed: the record
-        holds `holds`, which the confirmation named), then a pass for it: its A record pointed at this network."""
+    def ddns_take_over(self, host: str, holds=None, accept_take_over: bool = False) -> dict:
+        """A Dynamic DNS host holding another address taken over (the page's Take over…, confirmed twice: the record holds
+        `holds`, which the confirmation named; `accept_take_over` exactly true, the second confirmation, after the
+        keeper's TakeOverRefused said what is dropped), then a pass for it: its A record pointed at this network at once."""
         cfg = self.config(fresh=True)
         if not cfg.ddns_ready:
             raise ValueError(f"Dynamic DNS is not set up: {TOKEN} and {DDNS_HOSTS}")
@@ -669,18 +672,27 @@ class DigitalOceanPlugin(MachinePlugin):
             raise Refusal(f"{fqdn} holds {', '.join(now) or 'no A record'} now, not {holds}: nothing taken over (the page "
                           "is read again)")
         keeper = self.keeper()
-        keeper.take_over(fqdn)
+        keeper.take_over(fqdn, accept=accept_take_over, holds=", ".join(now) or "no A record")  # refused unless exactly true
         (state,) = keeper.run_pass([h], force=False) or [{}]
         return {"said": f"{fqdn} taken over for Dynamic DNS", "ok": bool(state.get("ok")), "changed": True,
                 "lines": [f"it held {', '.join(now) or 'no A record'}", state.get("result") or "checked on the next pass"]}
 
-    def _let_go(self, cfg: Config) -> None:
-        """The hosts taken out of the settings since they were last kept: no longer Dynamic DNS's own (let_go)."""
-        typed = typed_hosts(cfg)
+    def _settle(self, cfg: Config, zones) -> None:
+        """Every host the keeper holds that the Dynamic DNS setting no longer names let go (Keeper.settle, liminal-libs
+        1.49.7), so a host taken out of the setting, while the plugin ran or not, comes back as not its own. Only with the
+        whole setting: the login answered (`read_ok`) with the token among what it furnished (a signed-out login furnishes
+        nothing), not after a detach, and once the account's domains are read when the setting names a host; each
+        setting settled once."""
+        if not cfg.read_ok or TOKEN not in cfg.present or self._gone():
+            return
+        typed = frozenset(typed_hosts(cfg))
+        if typed and zones is None:
+            return
         with self._rt.lock:
-            before, self._rt.typed = self._rt.typed, typed
-        for fqdn in sorted((before or set()) - typed):
-            self.keeper().let_go(fqdn)
+            if self._rt.settled == typed:
+                return
+            self._rt.settled = typed
+        self.keeper().settle(sorted(typed))
 
     # -- attached: the reading in the background ----------------------------------------------------------------------------
     def attach(self, app, login=None) -> dict:
@@ -753,10 +765,11 @@ class DigitalOceanPlugin(MachinePlugin):
                         self._rt.soon = None
                     self._reread_droplets()
                 zones = self.zones()
+                if not stop.is_set():  # the whole setting, the account's domains read: what it no longer names let go
+                    self._settle(cfg, zones)
                 if cfg.ddns_ready and zones is not None and now >= next_ddns and not stop.is_set():
                     next_ddns = now + cfg.minutes * 60.0
                     hosts, _ = cfg.ddns_hosts(zones)
-                    self._let_go(cfg)
                     if hosts:
                         try:
                             self.keeper().run_pass(hosts, force=False, wait=0.5, stop=stop)

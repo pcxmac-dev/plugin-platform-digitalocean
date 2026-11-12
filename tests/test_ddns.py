@@ -11,7 +11,8 @@ import threading
 
 import pytest
 
-from conftest import HOME, FakeDigitalOcean, record, settings_of
+from conftest import HOME, FakeDigitalOcean, Pairs, record, settings_of
+from liminal_libs.machines.ddns import TakeOverRefused
 from plugin_platform_digitalocean import DigitalOceanPlugin
 
 NEW = "93.184.216.77"  # this network's address after it changed
@@ -74,7 +75,8 @@ def test_a_host_holding_another_address_is_left_as_it_is_with_take_over_offered(
                       "values": {"host": "www.example.com", "holds": "203.0.113.10"}}
     forms = {f["id"]: f for f in st["forms"]}
     assert forms["ddns-take"]["hook"] == "ddns_take_over" and forms["ddns-take"]["confirm"]["danger"] is True
-    assert [x["name"] for x in forms["ddns-take"]["fields"]] == ["host", "holds"]
+    assert [x["name"] for x in forms["ddns-take"]["fields"]] == ["host", "holds", "accept_take_over"]  # the hook's, in order
+    assert forms["ddns-take"]["fields"][2]["type"] == "accept"  # Take over… is asked twice
     assert forms["ddns-now"]["hook"] == "ddns_update" and forms["ddns-now"]["fields"] == []
     assert {"form": "ddns-now", "title": "Update DNS now"} in st["actions"]  # confirmed now, not asked on one click
     assert not any(a.get("hook") == "ddns_update" for a in st["actions"])
@@ -91,7 +93,7 @@ def test_take_over_then_a_pass_sets_it(made, env):
     with pytest.raises(ValueError, match="is not one of the Dynamic DNS hosts"):
         p.ask("ddns_take_over", "blog.example.com", "www.example.com.")
     assert fake.writes() == []
-    rep = p.ask("ddns_take_over", "www.example.com", "203.0.113.10")  # as the page's Take over… sends it
+    rep = p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)  # as the page sends it, confirmed twice
     assert a_writes(fake) == [("PUT", "/v2/domains/example.com/records/15",
                                {"type": "A", "name": "www", "data": HOME, "ttl": 3600})]  # its own TTL kept
     assert rep["ok"] is True and rep["lines"] == ["it held 203.0.113.10", "set (was 203.0.113.10)"]
@@ -109,7 +111,7 @@ def test_a_host_with_several_addresses_is_never_cut_to_one_unasked(made, env):
         (h,) = p.ddns_update(force=force)
         assert fake.writes() == [] and h["ok"] is False and h["holds"] == ["198.51.100.1", "198.51.100.2"]
     assert h["result"].startswith("holds 2 addresses (198.51.100.1, 198.51.100.2): left as it is")
-    rep = p.ask("ddns_take_over", "home.example.com", "198.51.100.1, 198.51.100.2")  # taken over: what it held is dropped
+    rep = p.ask("ddns_take_over", "home.example.com", "198.51.100.1, 198.51.100.2", True)  # what it held is dropped
     assert a_writes(fake) == [("PUT", "/v2/domains/example.com/records/40", {"type": "A", "name": "home", "data": HOME,
                                                                              "ttl": 1800}),
                               ("DELETE", "/v2/domains/example.com/records/41", None)]
@@ -158,19 +160,83 @@ def test_a_pass_whose_plugin_was_detached_writes_nothing(made, env):
     assert fake.writes() == []
 
 
-def test_a_host_taken_out_of_the_settings_is_let_go(made, env, monkeypatch):
+def test_take_over_is_asked_twice_and_only_an_exact_true_takes_it(made, env):
+    """Take over… sets the record at once and drops every address it held: refused on the first confirmation, naming
+    accept_take_over (the page asks it as a second one); a "true", a 1 or a "yes" from another program is no second
+    confirmation; True itself takes it, and the pass sets the record."""
+    env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="www.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ddns_update(force=False)
+    keeper = p.keeper()
+    with pytest.raises(TakeOverRefused) as refused:
+        p.ask("ddns_take_over", "www.example.com", "203.0.113.10")
+    assert refused.value.accept == "accept_take_over" and "www.example.com holds 203.0.113.10" in str(refused.value)
+    for not_yes in ("true", 1, "yes", "1", [True]):
+        with pytest.raises(TakeOverRefused):
+            p.ask("ddns_take_over", "www.example.com", "203.0.113.10", not_yes)
+    assert not keeper.taken("www.example.com") and fake.writes() == []  # nothing taken
+    rep = p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
+    assert keeper.taken("www.example.com") and rep["ok"] is True
+    assert a_writes(fake) == [("PUT", "/v2/domains/example.com/records/15",
+                               {"type": "A", "name": "www", "data": HOME, "ttl": 3600})]
+
+
+def test_a_host_taken_over_then_taken_out_of_the_setting_is_let_go_and_left_as_it_is_once_back(made, env, monkeypatch):
     env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="home.example.com, www.example.com"))
     p, fake = made()
     p.refresh()
     p.ddns_update(force=False)
-    p.ask("ddns_take_over", "www.example.com", "203.0.113.10")
+    p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
     keeper = p.keeper()
     assert keeper.own("home.example.com") == HOME and keeper.taken("www.example.com")
     monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com")
     p.settings_changed()
-    p.ddns_update(force=False)
+    p.ddns_update(force=False)  # the next pass: settled with the whole setting
     assert not keeper.taken("www.example.com") and keeper.own("www.example.com") is None  # no longer its own
     assert keeper.own("home.example.com") == HOME
+    writes = len(fake.writes())
+    monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com, www.example.com")  # put back later, the network's
+    q, _ = made(fake, public=lambda: (NEW, "OpenDNS"))  # address changed meanwhile (the platform started again)
+    q.refresh()
+    hosts = {h["host"]: h for h in q.ddns_update(force=False)}
+    www = hosts["www.example.com"]
+    assert www["foreign"] is True and www["holds"] == [HOME]  # left as it is: no longer its own to move
+    assert [w["json"]["data"] for w in fake.writes()[writes:]] == [NEW]  # home, its own, moved; www not
+    row = next(r for r in ddns_table(q.status())["rows"] if r[0] == "www.example.com")
+    assert row[5]["form"] == "ddns-take" and row[5]["values"] == {"host": "www.example.com", "holds": HOME}
+
+
+def test_a_host_taken_out_of_the_setting_while_the_plugin_was_not_running_is_let_go(made, env, monkeypatch):
+    env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="home.example.com, www.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
+    monkeypatch.setenv("DIGITALOCEAN_DDNS_HOSTS", "home.example.com")  # changed while the platform was not running
+    q, _ = made(fake)
+    keeper = q.keeper()
+    assert keeper.taken("www.example.com")  # its state file still says so
+    q._settle(q.config(), q.zones())  # the account's domains not read yet: nothing let go (never an unread list)
+    assert keeper.taken("www.example.com")
+    q.refresh()  # read: settled with the whole setting
+    assert not keeper.taken("www.example.com") and keeper.known() == []  # www no longer its own, nor taken
+
+
+def test_a_setting_that_could_not_be_read_whole_lets_nothing_go(made, env):
+    env(settings_of(ddns=True, DIGITALOCEAN_DDNS_HOSTS="www.example.com"))
+    p, fake = made()
+    p.refresh()
+    p.ask("ddns_take_over", "www.example.com", "203.0.113.10", True)
+    keeper = p.keeper()
+
+    class Down(Pairs):
+        def names(self):
+            raise ConnectionError("the login app is not answering")
+    for login in (Down({}), Pairs({})):  # a login that cannot be asked; one that furnishes nothing (signed out)
+        p.login = login
+        p.settings_changed()
+        p._settle(p.config(), p.zones())
+        assert keeper.taken("www.example.com")
 
 
 def test_hosts_in_none_of_the_accounts_domains_are_said_and_the_page_draws_the_rest(made, env):

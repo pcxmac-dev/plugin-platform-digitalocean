@@ -78,12 +78,15 @@ name.
   `digitalocean/ddns.json` under the platform's folder, `LIMINAL_PLATFORM_DIR` or the data folder's `platform/`), and
   one you took over. A record of its own that differs is changed in place (its TTL kept).
 - **Not its own**, and left as it is: a host holding another address (a live server's, set by hand) or several. Its
-  row says what it holds and offers **Take over…**: confirmed (the dialog names what it holds and that whatever answers
-  there stops answering at that name), the host is pointed at this network on a pass at once, and kept there; a host
-  that held several addresses then keeps one A record. Several addresses are never cut to one unasked.
+  row says what it holds and offers **Take over…**, asked twice (the first dialog names what it holds; the second,
+  "Drop what it holds?", that every address it holds is dropped and whatever answers there stops answering at that
+  name): the host is pointed at this network on a pass at once, and kept there; a host that held several addresses
+  then keeps one A record. Several addresses are never cut to one unasked.
 - Just before a write the address is asked again: a stale one is never written back. **Update DNS now** is confirmed
-  first, and sets every host of its own (never one that is not). A host taken out of the setting is let go (no longer
-  its own). Once the plugin is detached, a pass under way writes nothing more.
+  first, and sets every host of its own (never one that is not). A host taken out of the setting is let go, whether
+  the plugin ran or not when it was taken out (the keeper settled with the whole setting, once the account's domains
+  are read): put back later, it is not its own, and a record it set is left as it is until taken over again. Once the
+  plugin is detached, a pass under way writes nothing more.
 
 The domain's registrar must name DigitalOcean's name servers (ns1, ns2 and ns3.digitalocean.com) for the record to be
 the one the world sees.
@@ -181,7 +184,7 @@ Its status is what was read last (no request is made to answer it).
 `add_firewall_rule(firewall_id, firewall=None, direction="inbound", protocol="tcp", ports=None, action="allow", addresses=None, droplets=None, tags=None, accept_risky=False)`,
 `remove_firewall_rule(firewall_id, firewall=None, direction="inbound", rule="", accept_risky=False)`,
 `add_ssh_key(name, public_key)`, `remove_ssh_key(fingerprint, name=None)`, `ddns_update(force=True)`,
-`ddns_take_over(host, holds=None)`. A refusal is
+`ddns_take_over(host, holds=None, accept_take_over=False)`. A refusal is
 `errors.Refusal` (a ValueError); its `accept` names the argument the page's second confirmation sets. A change's
 answer: `said`, `lines`, `ok`, `changed`.
 

@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.1.1 (2026-11-11)
+## 0.1.2 (2026-11-11)
+
+What the re-verification of the audit's fixes found in Dynamic DNS (liminal-libs 1.49.7). Needs liminal-libs>=1.49.7.
+
+- **Take over… is asked twice**: it sets the record at once and drops every address it holds. `ddns_take_over(host,
+  holds, accept_take_over)` keeps its checks (the host is in the setting, the record still holds what the page showed),
+  then asks the keeper, which refuses (`TakeOverRefused`, naming `accept_take_over`) unless that is exactly true; the
+  page asks it as a second confirmation ("Drop what it holds?"). A "true", a 1 or a "yes" from another program is
+  refused like none.
+- **A host taken out of the setting is let go, while the plugin ran or not** (`Keeper.settle`, replacing 0.1.1's let-go
+  of this process alone, which a restart forgot): settled with the whole setting after each refresh and in the
+  background, once the account's domains are read, and only when the login answered with the token among what it
+  furnished (a login that cannot be asked, or one signed out, lets nothing go). Put back later, the host is not its
+  own: a record it set is left as it is, its row offering Take over… again.
 
 What the audit of the cloud plugins found before any key went in (session 87405e6a: eight reviewers, a skeptic per
 finding; its DigitalOcean section: 2 blockers, 6 should-fix, 4 minor). Needs liminal-libs>=1.49.2.
