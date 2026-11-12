@@ -55,6 +55,9 @@ and the variable DIGITALOCEAN_TOKEN, which Terraform and PyDo read too.
 
 The platform's one-shot commands (status, machine: `PlatformApp.once`, liminal-platform 0.20.1) start none of its background work.
 
+Needs liminal-libs>=1.49.9: a take-over's consent is bound to the addresses it drops (a record changed after
+a failed write is asked about again); the state file keeps each take-over's addresses.
+
 ## 0.1.0 (2026-11-11)
 
 The first release (the user: "ALSO i would like to add two new plugins, Digital Ocean and LINODE"; for the cloud plugins

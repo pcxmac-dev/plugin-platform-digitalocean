@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 # the library it plugs into (the machine kind, its REST client and Dynamic DNS as of 1.49.8: liminal_libs.machines; plugin API 2.2:
 # liminal_libs.sources.apis; the Login interface: liminal_libs.apps); its HTTPS is the library's (requests)
-dependencies = ["liminal-libs>=1.49.8"]
+dependencies = ["liminal-libs>=1.49.9"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

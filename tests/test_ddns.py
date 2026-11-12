@@ -44,7 +44,7 @@ def test_a_missing_record_is_made_and_kept_its_own_and_the_name_is_asked_in_full
     (h,) = p.ddns_update(force=False)
     assert len(fake.writes()) == 1 and h["result"] == "current"  # current: nothing sent
     state = json.loads((tmp_path / "platform" / "digitalocean" / "ddns.json").read_text(encoding="utf-8"))
-    assert state == {"own": {"home.example.com": HOME}, "taken": []}  # its own, kept for a restart
+    assert state == {"own": {"home.example.com": HOME}, "taken": {}}  # its own, kept for a restart
 
 
 def test_its_own_old_address_is_updated_after_the_networks_address_changed_a_restart_too(made, env):
