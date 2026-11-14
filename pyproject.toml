@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plugin-platform-digitalocean"
-version = "0.1.2"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
+version = "0.1.3"  # the plugin's own release (CHANGELOG.md); the platform shows it on the plugin's page
 description = "DigitalOcean for Liminal's platform: the account through DigitalOcean's API (Droplets with their prices, domains and records, cloud firewalls, volumes, SSH keys, reserved IPs), only the changes that cost nothing, each confirmed, and Dynamic DNS through DigitalOcean's DNS."
 readme = "README.md"
 requires-python = ">=3.10"
