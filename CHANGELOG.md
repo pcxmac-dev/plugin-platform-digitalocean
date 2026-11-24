@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 (2026-11-24)
+
+A record's "Replace it" bound to what its refusal showed (the review of 2026-11-21, item 26). `set_record` with
+`accept_replace` replaced whatever the record held when the confirmation came, which need not be the value the
+refusal named. The page sends the same arguments again with its second confirmation, so the refusal now keeps the
+record and the value it showed (by the change asked, for 15 minutes, 32 at most), and the accepted call is refused,
+nothing sent, when the record holds anything else now, or when no refusal showed it lately: set again, the new
+refusal names what it holds now. Binding as liminal-libs 1.49.9's take-over binds `holds`. Test: an accept never
+shown, then one whose record changed after its refusal, both refused with nothing written; asked again, replaced.
+
 ## 0.1.3 (2026-11-14)
 
 Drawn under the platform's Cloud plugins section, in the list on the left (the user: "classify the cloud plugins under the 'cloud plugins' section which should be on the far left"): `SECTION = "cloud"`. That is liminal-libs

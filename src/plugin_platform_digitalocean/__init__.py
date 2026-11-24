@@ -44,12 +44,14 @@ from .errors import Refusal
 from .page import ACCEPT_HARD, ACCEPT_REPLACE, ACCEPT_RISKY, BILLING, plural, when
 from .settings import DDNS_HOSTS, KEYS, NAMES, TOKEN, Config
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a read that failed is taken as untried after this long while detached: attached again, it is tried again
 ZONES_MAX = 12  # the domains whose records a refresh reads (the rest: `records DOMAIN`)
 SOON_S = 30.0  # the Droplets read again this long after a power action, while attached
+SHOWN_S = 900.0  # a refusal's "replace it?" answered within this long is bound to what it showed; later, asked again
+SHOWN_MAX = 32  # the refusals kept for their confirmations at most
 STOP_WAIT_S = 10.0  # how long a detach waits for the background to end (it ends at its next step regardless)
 DIR_VAR = "LIMINAL_PLATFORM_DIR"  # the platform's own folder (its app's variable): the Dynamic DNS state goes under it
 PLATFORM = "platform"  # the app whose attaching starts the background (App.NAME): no other app's does
@@ -151,6 +153,21 @@ class _Runtime:
         self.refreshing = threading.Lock()
         self.soon: float | None = None  # when the Droplets are read again (a power action asked: monotonic time)
         self.settled: frozenset | None = None  # the Dynamic DNS setting the keeper was last settled with (Keeper.settle)
+        self.shown: dict[tuple, tuple[float, tuple]] = {}  # a replacement refused: what its refusal showed, by the change
+
+    def show(self, key: tuple, held: tuple) -> None:
+        """What a refusal showed the user, kept for the confirmation that answers it (SHOWN_S, SHOWN_MAX at most)."""
+        with self.lock:
+            self.shown.pop(key, None)
+            while len(self.shown) >= SHOWN_MAX:
+                del self.shown[next(iter(self.shown))]
+            self.shown[key] = (time.monotonic(), held)
+
+    def shown_for(self, key: tuple) -> tuple | None:
+        """What the refusal of this change showed (taken: a confirmation answers one refusal), None when none did lately."""
+        with self.lock:
+            at, held = self.shown.pop(key, (None, None))
+        return held if at is not None and time.monotonic() - at <= SHOWN_S else None
 
     def clear(self) -> None:
         """What was read, forgotten (another token)."""
@@ -490,11 +507,25 @@ class DigitalOceanPlugin(MachinePlugin):
         if change.op == "none":
             return {"domain": d, "said": change.said, "lines": [], "ok": True, "changed": False}
         was = change.was or {}
-        if change.op == "update" and not recmod.same_data(change.body["type"], was.get("data"), change.body["data"]) \
-                and not exactly(accept_replace):
-            raise Refusal(f"{recmod.said(was)} is there now: setting {change.body['name']} {change.body['type']} to "
-                          f"{change.body['data']} replaces it, in place. It is set only once that is accepted "
-                          "(accept_replace)", accept=ACCEPT_REPLACE)
+        if change.op == "update" and not recmod.same_data(change.body["type"], was.get("data"), change.body["data"]):
+            # The confirmation is bound to what its refusal showed (the review of 2026-11-21, item 26: accept_replace
+            # replaced whatever the record held by then). The page sends the same arguments again with it, so the
+            # refusal's record and value are kept here, and the accepted call is refused, nothing sent, unless the
+            # record holds exactly that still (as 1.49.9's take-over binds `holds`).
+            key = (d, change.body["name"], change.body["type"], change.body["data"])
+            held = (change.record_id, str(was.get("data")))
+            if not exactly(accept_replace):
+                self._rt.show(key, held)
+                raise Refusal(f"{recmod.said(was)} is there now: setting {change.body['name']} {change.body['type']} to "
+                              f"{change.body['data']} replaces it, in place. It is set only once that is accepted "
+                              "(accept_replace)", accept=ACCEPT_REPLACE)
+            shown = self._rt.shown_for(key)
+            if shown is None:
+                raise Refusal(f"{recmod.said(was)} is there now, and no refusal showed it lately: nothing sent (set it "
+                              "again to see what it replaces)")
+            if shown != held:
+                raise Refusal(f"{recmod.said(was)} is there now, not {shown[1]} as the confirmation showed: nothing "
+                              "sent (set it again to see what it replaces)")
         got = api.create_record(d, change.body) if change.op == "create" else api.update_record(d, change.record_id, change.body)
         self._reread_records(d)
         return {"domain": d, "said": change.said, "ok": True, "changed": True, "record": got,

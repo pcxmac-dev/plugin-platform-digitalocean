@@ -326,6 +326,29 @@ def test_a_second_confirmation_counts_only_when_it_is_exactly_true(ready):
     assert last(fake) == ("POST", f"/v2/droplets/{WEB}/actions", {"type": "power_off"})
 
 
+def test_a_replacement_accepted_is_the_one_its_refusal_showed(ready):
+    """The review of 2026-11-21, item 26: accept_replace replaced whatever the record held by the time it came. The
+    confirmation is bound to the record and value its refusal named: changed since, or never shown, nothing is sent."""
+    p, fake, forms = ready()
+    s = forms["set:example.com"]
+    values = {"name": "www", "rtype": "A", "data": "203.0.113.60"}
+    writes = len(fake.writes())
+    with pytest.raises(Refusal, match="no refusal showed it lately: nothing sent"):  # accepted, never shown
+        p.ask(s["hook"], *page_args(s, values, accepted={ACCEPT_REPLACE}))
+    with pytest.raises(Refusal, match="www A 203.0.113.10 is there now") as refused:
+        p.ask(s["hook"], *page_args(s, values))
+    assert refused.value.accept == ACCEPT_REPLACE
+    (www,) = [r for r in fake.records["example.com"] if (r["name"], r["type"]) == ("www", "A")]
+    www["data"] = "203.0.113.99"  # someone else's change between the refusal and its confirmation
+    with pytest.raises(Refusal, match="www A 203.0.113.99 is there now, not 203.0.113.10 as the confirmation showed"):
+        p.ask(s["hook"], *page_args(s, values, accepted={ACCEPT_REPLACE}))
+    assert len(fake.writes()) == writes and www["data"] == "203.0.113.99"
+    with pytest.raises(Refusal, match="www A 203.0.113.99 is there now: setting"):  # asked again: what it holds now
+        p.ask(s["hook"], *page_args(s, values))
+    rep = p.ask(s["hook"], *page_args(s, values, accepted={ACCEPT_REPLACE}))
+    assert rep["said"] == "set www A 203.0.113.60 (it was 203.0.113.99)" and len(fake.writes()) == writes + 1
+
+
 def test_every_deny_over_ssh_or_every_port_is_asked_twice_whatever_the_firewall_applies_to(ready):
     """Deny is DigitalOcean's own (its reference's rule object: "This may be one of `allow` or `deny`"): kept, and asked
     twice over SSH or every port, added or removed, even on a firewall applied to no Droplet yet."""
