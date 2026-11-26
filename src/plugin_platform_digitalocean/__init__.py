@@ -16,6 +16,13 @@ reads the account every quarter of an hour and keeps the Dynamic DNS hosts every
 exactly true (an audit, 2026-11-11: 0.1.1). Its status is what was read last (no request is made to answer it): the platform's page draws its
 tables, its actions (Refresh, Update DNS now) and its forms. What it attaches to is its API card (card.py: plugin API 2.2).
 
+Who may ask its changes (0.1.5; the independent review's PLT-H1 and the sweep of the plugins after it, 2026-11-25): a
+Droplet's power, a record set or removed, a cloud firewall's rule added or removed, an SSH key added or removed, a Dynamic
+DNS pass and a host taken over are asked only from its page (PAGE_ONLY_HOOKS): another plugin's ask is refused, and the
+platform asks its login whether you are at the page. Before, any program on this PC could ask them of the platform with a
+header anyone can send, and the token did the rest; a second confirmation is an argument the asker sets. Its reads are
+asked by anyone. The background and the command line call the same code themselves: those are not asks.
+
     python -m plugin_platform_digitalocean status | servers | domains | records DOMAIN | ddns [--now] | firewalls | keys
         | power NAME on|off|reboot|hard-off|cycle | set DOMAIN NAME TYPE DATA [--ttl N] ... | remove DOMAIN NAME TYPE [DATA]
 """
@@ -44,7 +51,7 @@ from .errors import Refusal
 from .page import ACCEPT_HARD, ACCEPT_REPLACE, ACCEPT_RISKY, BILLING, plural, when
 from .settings import DDNS_HOSTS, KEYS, NAMES, TOKEN, Config
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a read that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -200,6 +207,15 @@ class DigitalOceanPlugin(MachinePlugin):
     HOOKS = (*MachinePlugin.HOOKS, "refresh", "droplets", "domains", "records", "firewalls", "ssh_keys", "balance", "power",
              "set_record", "remove_record", "add_firewall_rule", "remove_firewall_rule", "add_ssh_key", "remove_ssh_key",
              "ddns_update", "ddns_take_over")
+    # Its changes, asked only from its page (0.1.5, the sweep after the review's PLT-H1; liminal-libs 1.66.0's
+    # apps/asking.py): another plugin's ask is refused (403), and liminal-platform 0.34.0 refuses one over HTTP (401) unless
+    # its login shows that you are at the page. Before, any program on this PC could ask them of the platform with a header
+    # anyone can send, the page's dialogs being the only confirmation (a second one, accept_hard or accept_risky, is an
+    # argument the asker sets): a Droplet's power cut, a record set or removed, a firewall opened, with your token. The
+    # background's reads and Dynamic DNS passes and the command line call the code directly, not through an ask; its reads
+    # (refresh and the lists among them) are asked by anyone.
+    PAGE_ONLY_HOOKS = ("power", "set_record", "remove_record", "add_firewall_rule", "remove_firewall_rule", "add_ssh_key",
+                       "remove_ssh_key", "ddns_update", "ddns_take_over")
     keys = KEYS
     signup = TOKENS
     limits = ("DigitalOcean's API: 5,000 requests an hour and 250 a minute per token; a refresh asks about 20 to 30 every "

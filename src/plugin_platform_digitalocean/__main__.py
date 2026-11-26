@@ -16,7 +16,9 @@
                                              before what a record holds is replaced
     remove DOMAIN NAME TYPE [DATA]           a record removed, the rest kept; asks "yes" first
 
---json prints the answer as JSON. The cloud firewalls' rules and the SSH keys are changed from the platform's page."""
+--json prints the answer as JSON. The cloud firewalls' rules and the SSH keys are changed from the platform's page. The
+platform asks the plugin's changes only from its page (PAGE_ONLY_HOOKS, 0.1.5); this command line asks the platform
+nothing: it calls the same code in its own process, with this shell's settings, as before."""
 from __future__ import annotations
 
 import argparse

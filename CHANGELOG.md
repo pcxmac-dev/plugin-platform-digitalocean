@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.5 (2026-11-25)
+
+Its changes are asked only from the page (`PAGE_ONLY_HOOKS`, liminal-libs 1.66.0's word): the independent review's
+finding PLT-H1, and the sweep of every plugin's hooks that followed it. The user, 2026-11-25, chose "Plugin releases":
+each plugin says which of its hooks only its page asks.
+
+- **What only the page asks**: `power`, `set_record`, `remove_record`, `add_firewall_rule`, `remove_firewall_rule`,
+  `add_ssh_key`, `remove_ssh_key`, `ddns_update` and `ddns_take_over`. Another plugin's ask of one is refused (403),
+  and so is an ask that names no asker; liminal-platform 0.34.0 refuses one over HTTP (401) unless its login shows
+  that you are at the page. A platform that holds no login asks them as before. The 401 rests on the login's word
+  that your browser is signed in, and a local login signs `secret` and `default` in with no password, so a program on
+  this PC can sign itself in and ask them still: a proof that a program cannot make is the login's and the platform's
+  to give, not this plugin's.
+- **Before**, the platform handed an ask of any program on this PC (`POST /api/machines/digitalocean/ask`, with a
+  header anyone can send and a Host the client chooses, no sign-in) straight to the hook it named, and the hook used
+  your token. The page's dialogs were the only confirmation, and a second confirmation is an argument the asker sets:
+  `power` with `[id, name, "power_off", true]` cut a Droplet's power; `add_firewall_rule` with `accept_risky` true
+  opened PostgreSQL or SSH to the whole internet, and `remove_firewall_rule` took out the rule letting SSH in;
+  `ddns_take_over` with `[host, null, true]` pointed a Dynamic DNS host holding a live server's address at this
+  network. `set_record` added an MX record beside yours and `remove_record` removed a record, neither asked twice.
+- **As before**: its reads (`present`, `status`, `refresh` and the lists) are asked by anyone. The background (the
+  account read every quarter of an hour, the Dynamic DNS passes) and the command line call the plugin's code
+  themselves, not through an ask. The library floor stays 1.49.9: a library before 1.66.0 does not read the word, and
+  asks the hooks as it did.
+- Tests: `tests/test_who_asks.py`, through the library's own App over the stand-in DigitalOcean: each of the nine
+  refused to another plugin and to no one, no request made; the same nine asked from the page, each sent; the reads
+  answered to a plugin; a Dynamic DNS pass run by the plugin's own code. A hook taken out of `PAGE_ONLY_HOOKS` fails
+  it. Skipped on a library before 1.66.0.
+
 ## 0.1.4 (2026-11-24)
 
 A record's "Replace it" bound to what its refusal showed (the review of 2026-11-21, item 26). `set_record` with
