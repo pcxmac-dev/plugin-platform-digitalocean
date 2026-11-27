@@ -21,7 +21,7 @@ Droplet's power, a record set or removed, a cloud firewall's rule added or remov
 DNS pass and a host taken over are asked only from its page (PAGE_ONLY_HOOKS): another plugin's ask is refused, and the
 platform asks its login whether you are at the page. Before, any program on this PC could ask them of the platform with a
 header anyone can send, and the token did the rest; a second confirmation is an argument the asker sets. Its reads are
-asked by anyone. The background and the command line call the same code themselves: those are not asks.
+asked only from its page too since 0.1.6 (`present` and `status` by anyone). The background and the command line call the same code themselves: those are not asks.
 
     python -m plugin_platform_digitalocean status | servers | domains | records DOMAIN | ddns [--now] | firewalls | keys
         | power NAME on|off|reboot|hard-off|cycle | set DOMAIN NAME TYPE DATA [--ttl N] ... | remove DOMAIN NAME TYPE [DATA]
@@ -51,7 +51,7 @@ from .errors import Refusal
 from .page import ACCEPT_HARD, ACCEPT_REPLACE, ACCEPT_RISKY, BILLING, plural, when
 from .settings import DDNS_HOSTS, KEYS, NAMES, TOKEN, Config
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 REFRESH_S = 900.0  # the account read again at most this often while attached (or by Refresh)
 CONFIG_S = 30.0  # the settings asked of the login again after this long
 RETRY_S = 900.0  # a read that failed is taken as untried after this long while detached: attached again, it is tried again
@@ -213,9 +213,16 @@ class DigitalOceanPlugin(MachinePlugin):
     # anyone can send, the page's dialogs being the only confirmation (a second one, accept_hard or accept_risky, is an
     # argument the asker sets): a Droplet's power cut, a record set or removed, a firewall opened, with your token. The
     # background's reads and Dynamic DNS passes and the command line call the code directly, not through an ask; its reads
-    # (refresh and the lists among them) are asked by anyone.
+    # (refresh and the lists among them) are asked only from its page too since 0.1.6 (`present` and `status` by anyone).
     PAGE_ONLY_HOOKS = ("power", "set_record", "remove_record", "add_firewall_rule", "remove_firewall_rule", "add_ssh_key",
                        "remove_ssh_key", "ddns_update", "ddns_take_over")
+    # Its reads made with the account's key, asked only from its page too (0.1.6; liminal-libs 1.107.0 closes
+    # every hook a plugin declares for no one, and the user, 2026-11-26, chose "Page-only" for these): each sends
+    # requests as you and returns what the account holds, so another plugin's ask and an ask that names no one are
+    # refused, and the platform asks its login whether you are at the page. `present` and `status` stay anyone's
+    # (MachinePlugin's reads).
+    PAGE_ONLY_HOOKS = (*PAGE_ONLY_HOOKS, "refresh", "droplets", "domains", "records", "firewalls", "ssh_keys",
+                       "balance")
     keys = KEYS
     signup = TOKENS
     limits = ("DigitalOcean's API: 5,000 requests an hour and 250 a minute per token; a refresh asks about 20 to 30 every "
